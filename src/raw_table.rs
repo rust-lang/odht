@@ -147,9 +147,9 @@ fn desired_index(hash: u32, mod_mask: usize) -> usize {
 /// From https://gist.github.com/ssylvan/5538011
 #[inline]
 fn probe_distance(hash: u32, slot_index: usize, mod_mask: usize) -> usize {
-    let capacity = mod_mask + 1;
-    debug_assert!(capacity.is_power_of_two());
-    (slot_index + capacity - desired_index(hash, mod_mask)) & mod_mask
+    let slot_count = mod_mask + 1;
+    debug_assert!(slot_count.is_power_of_two());
+    (slot_index + slot_count - desired_index(hash, mod_mask)) & mod_mask
 }
 
 /// This type provides a readonly view of the given table data.
@@ -226,26 +226,6 @@ where
     #[inline]
     pub(crate) fn iter(&'a self) -> RawIter<'a, K, V> {
         RawIter::new(self.metadata, self.data)
-    }
-
-    /// Returns the raw byte representation of the table's entry metadata.
-    /// It is safe to persist this data to disk as is.
-    pub(crate) fn metadata_bytes(&self) -> &[u8] {
-        let byte_ptr = self.metadata.as_ptr() as *const u8;
-        let num_bytes = self.data.len() * std::mem::size_of::<EntryMetadata>();
-
-        unsafe { std::slice::from_raw_parts(byte_ptr, num_bytes) }
-    }
-
-    /// Returns the raw byte representation of the table's key-value data.
-    /// It is safe to persist this data to disk as is.
-    pub(crate) fn entry_data_bytes(&self) -> &[u8] {
-        assert!(std::mem::align_of::<Entry<K, V>>() == 1);
-
-        let byte_ptr = self.data.as_ptr() as *const u8;
-        let num_bytes = self.data.len() * std::mem::size_of::<Entry<K, V>>();
-
-        unsafe { std::slice::from_raw_parts(byte_ptr, num_bytes) }
     }
 
     /// Check (for the first `entries_to_check` entries) if the computed and

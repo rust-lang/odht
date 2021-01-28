@@ -9,12 +9,12 @@
 //!
 //! In order to use the hash table one needs to implement the `Config` trait.
 //! This trait defines how the table is encoded and what hash function is used.
-//! With a `Config` in place the `HashTableBuilder` type can be used to build and serialize a hash table.
+//! With a `Config` in place the `HashTableOwned` type can be used to build and serialize a hash table.
 //! The `HashTable` type can then be used to create an almost zero-cost view of the serialized hash table.
 //!
 //! ```rust
 //!
-//! use odht::{HashTable, HashTableBuilder, Config, FxHashFn};
+//! use odht::{HashTable, HashTableOwned, Config, FxHashFn};
 //!
 //! struct MyConfig;
 //!
@@ -35,7 +35,7 @@
 //! }
 //!
 //! fn main() {
-//!     let mut builder = HashTableBuilder::<MyConfig>::with_capacity(3, 0.95);
+//!     let mut builder = HashTableOwned::<MyConfig>::with_capacity(3, 95);
 //!
 //!     builder.insert(&1, &2);
 //!     builder.insert(&3, &4);
@@ -58,14 +58,15 @@
 mod error;
 mod fxhash;
 mod raw_table;
+mod serialize;
 mod unhash;
 
-use error::Error;
-pub use fxhash::FxHashFn;
-pub use unhash::UnHashFn;
+pub use crate::fxhash::FxHashFn;
+pub use crate::unhash::UnHashFn;
 
-use raw_table::{ByteArray, Entry, EntryMetadata, RawIter, RawTable, RawTableMut};
-use std::{convert::TryInto, marker::PhantomData, mem::size_of};
+use crate::raw_table::{ByteArray, Entry, EntryMetadata, RawIter, RawTable, RawTableMut};
+use std::io::Cursor;
+use std::marker::PhantomData;
 
 /// This trait provides a complete "configuration" for a hash table, i.e. it
 /// defines the key and value types, how these are encoded and what hash
@@ -100,41 +101,45 @@ pub trait Config {
 }
 
 /// This trait represents hash functions as used by HashTable and
-/// HashTableBuilder.
+/// HashTableOwned.
 pub trait HashFn: Eq {
     fn hash(bytes: &[u8]) -> u32;
 }
 
-/// `HashTableBuilder` is used building and then persisting hash tables. It
+/// `HashTableOwned` is used building and then persisting hash tables. It
 /// does provide methods for looking up values but
-pub struct HashTableBuilder<C: Config> {
+pub struct HashTableOwned<C: Config> {
     _config: PhantomData<C>,
     raw_metadata: Vec<EntryMetadata>,
     raw_data: Vec<Entry<C::RawKey, C::RawValue>>,
     mod_mask: usize,
-    max_load_factor: f32,
+
     max_item_count: usize,
     item_count: usize,
+
+    // We use integer math here as not to run into any issues with
+    // platform-specific floating point math implementation.
+    max_load_factor_percent: u8,
 }
 
-impl<C: Config> HashTableBuilder<C> {
-    pub fn with_capacity(item_count: usize, max_load_factor: f32) -> HashTableBuilder<C> {
-        assert!(max_load_factor < 1.0);
-        assert!(max_load_factor > 0.1);
+impl<C: Config> HashTableOwned<C> {
+    pub fn with_capacity(item_count: usize, max_load_factor_percent: u8) -> HashTableOwned<C> {
+        assert!(max_load_factor_percent <= 100);
+        assert!(max_load_factor_percent > 0);
 
-        let slots_needed = (item_count as f32 / max_load_factor).ceil() as usize;
-        let capacity = slots_needed.checked_next_power_of_two().unwrap();
-        assert!(capacity > 0);
+        let slots_needed = slots_needed(item_count, max_load_factor_percent);
+        let slots_needed = slots_needed.checked_next_power_of_two().unwrap();
+        assert!(slots_needed > 0);
 
-        let mod_mask = capacity.checked_sub(1).unwrap();
-        let max_item_count = (capacity as f32 * max_load_factor).ceil() as usize;
+        let mod_mask = slots_needed.checked_sub(1).unwrap();
+        let max_item_count = max_item_count(slots_needed, max_load_factor_percent);
 
-        HashTableBuilder {
+        HashTableOwned {
             _config: PhantomData::default(),
-            raw_metadata: vec![EntryMetadata::default(); capacity],
-            raw_data: vec![Entry::default(); capacity],
+            raw_metadata: vec![EntryMetadata::default(); slots_needed],
+            raw_data: vec![Entry::default(); slots_needed],
             mod_mask,
-            max_load_factor,
+            max_load_factor_percent,
             max_item_count,
             item_count: 0,
         }
@@ -172,7 +177,7 @@ impl<C: Config> HashTableBuilder<C> {
 
     pub fn from_iterator<I: IntoIterator<Item = (C::Key, C::Value)>>(
         it: I,
-        max_load_factor: f32,
+        max_load_factor_percent: u8,
     ) -> Self {
         let it = it.into_iter();
 
@@ -188,21 +193,21 @@ impl<C: Config> HashTableBuilder<C> {
         };
 
         if let Some(known_size) = known_size {
-            let mut table = HashTableBuilder::with_capacity(known_size, max_load_factor);
+            let mut table = HashTableOwned::with_capacity(known_size, max_load_factor_percent);
 
-            let initial_capacity = table.raw_data.len();
+            let initial_slot_count = table.raw_data.len();
 
             for (k, v) in it {
                 table.insert(&k, &v);
             }
 
             assert_eq!(table.len(), known_size);
-            assert_eq!(table.raw_data.len(), initial_capacity);
+            assert_eq!(table.raw_data.len(), initial_slot_count);
 
             table
         } else {
             let items: Vec<_> = it.collect();
-            Self::from_iterator(items, max_load_factor)
+            Self::from_iterator(items, max_load_factor_percent)
         }
     }
 
@@ -223,7 +228,7 @@ impl<C: Config> HashTableBuilder<C> {
     #[inline(never)]
     #[cold]
     fn grow(&mut self) {
-        let mut new_table = Self::with_capacity(self.item_count * 2, self.max_load_factor);
+        let mut new_table = Self::with_capacity(self.item_count * 2, self.max_load_factor_percent);
 
         {
             let mut new_table = new_table.as_raw_mut();
@@ -237,16 +242,36 @@ impl<C: Config> HashTableBuilder<C> {
     }
 
     pub fn serialize(&self, w: &mut dyn std::io::Write) -> Result<(), Box<dyn std::error::Error>> {
-        assert!(self.raw_data.len().is_power_of_two());
+        serialize::serialize::<C>(
+            &self.raw_metadata,
+            &self.raw_data,
+            self.item_count,
+            self.max_load_factor_percent,
+            w,
+        )
+    }
 
-        let header = Header::new::<C>(self.item_count, self.raw_data.len());
+    pub fn serialize_to_vec(&self) -> Vec<u8> {
+        let bytes_needed = serialize::bytes_needed::<C>(self.raw_metadata.len());
+        let mut cursor = Cursor::new(Vec::with_capacity(bytes_needed));
+        self.serialize(&mut cursor).unwrap();
+        cursor.into_inner()
+    }
 
-        header.serialize(w)?;
+    pub fn from_serialized(data: &[u8]) -> Result<HashTableOwned<C>, Box<dyn std::error::Error>> {
+        let (header, raw_metadata, raw_data) = serialize::deserialize::<C>(data)?;
 
-        w.write_all(self.as_raw().metadata_bytes())?;
-        w.write_all(self.as_raw().entry_data_bytes())?;
+        let max_load_factor_percent = header.max_load_factor_percent();
 
-        Ok(())
+        Ok(HashTableOwned {
+            _config: PhantomData::default(),
+            raw_metadata: raw_metadata.to_owned(),
+            raw_data: raw_data.to_owned(),
+            mod_mask: header.mod_mask(),
+            item_count: header.item_count(),
+            max_load_factor_percent,
+            max_item_count: max_item_count(header.slot_count(), max_load_factor_percent),
+        })
     }
 
     #[inline]
@@ -255,12 +280,12 @@ impl<C: Config> HashTableBuilder<C> {
     }
 }
 
-impl<C: Config> std::fmt::Debug for HashTableBuilder<C> {
+impl<C: Config> std::fmt::Debug for HashTableOwned<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
             "(item_count={}, mod_mask={:x}, max_item_count={}, max_load_factor={})",
-            self.item_count, self.mod_mask, self.max_item_count, self.max_load_factor
+            self.item_count, self.mod_mask, self.max_item_count, self.max_load_factor_percent
         )?;
 
         writeln!(f, "{:?}", self.as_raw())
@@ -277,141 +302,17 @@ pub struct HashTable<'a, C: Config> {
     item_count: usize,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Header {
-    tag: [u8; 4],
-    size_of_metadata: u8,
-    size_of_key: u8,
-    size_of_value: u8,
-    size_of_header: u8,
-    item_count: [u8; 8],
-    capacity: [u8; 8],
-}
-
-const HEADER_TAG: [u8; 4] = *b"ODHT";
-const HEADER_SIZE: usize = size_of::<Header>();
-
-impl Header {
-    fn new<C: Config>(item_count: usize, capacity: usize) -> Header {
-        Header {
-            tag: HEADER_TAG,
-            size_of_metadata: size_of::<EntryMetadata>().try_into().unwrap(),
-            size_of_key: size_of::<C::RawKey>().try_into().unwrap(),
-            size_of_value: size_of::<C::RawValue>().try_into().unwrap(),
-            size_of_header: size_of::<Header>().try_into().unwrap(),
-            item_count: (item_count as u64).to_le_bytes(),
-            capacity: (capacity as u64).to_le_bytes(),
-        }
-    }
-
-    fn item_count(&self) -> usize {
-        u64::from_le_bytes(self.item_count) as usize
-    }
-
-    fn capacity(&self) -> usize {
-        u64::from_le_bytes(self.capacity) as usize
-    }
-
-    fn metadata_offset(&self) -> isize {
-        HEADER_SIZE as isize
-    }
-
-    fn data_offset(&self) -> isize {
-        (HEADER_SIZE + self.capacity() * size_of::<EntryMetadata>()) as isize
-    }
-
-    fn serialize(&self, w: &mut dyn std::io::Write) -> Result<(), Box<dyn std::error::Error>> {
-        let bytes =
-            unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, HEADER_SIZE) };
-
-        Ok(w.write_all(bytes)?)
-    }
-
-    fn from_serialized<C: Config>(data: &[u8]) -> Result<Header, Error> {
-        if data.len() < HEADER_SIZE {
-            return Err(Error(format!("Provided data not big enough for header.")));
-        }
-
-        let header = unsafe { *(data.as_ptr() as *const Header) };
-
-        if header.tag != HEADER_TAG {
-            return Err(Error(format!(
-                "Expected header tag {:?} but found {:?}",
-                HEADER_TAG, header.tag
-            )));
-        }
-
-        check_expected_size::<EntryMetadata>(header.size_of_metadata)?;
-        check_expected_size::<C::RawKey>(header.size_of_key)?;
-        check_expected_size::<C::RawValue>(header.size_of_value)?;
-        check_expected_size::<Header>(header.size_of_header)?;
-
-        let bytes_per_entry =
-            size_of::<Entry<C::RawKey, C::RawValue>>() + size_of::<EntryMetadata>();
-
-        if data.len() < HEADER_SIZE + header.capacity() * bytes_per_entry {
-            return Err(Error(format!(
-                "Provided data not big enough for capacity {}",
-                header.capacity()
-            )));
-        }
-
-        if !header.capacity().is_power_of_two() {
-            return Err(Error(format!(
-                "Capacity of hashtable should be a power of two but is {}",
-                header.capacity()
-            )));
-        }
-
-        return Ok(header);
-
-        fn check_expected_size<T>(expected_size: u8) -> Result<(), Error> {
-            if expected_size as usize != size_of::<T>() {
-                Err(Error(format!(
-                    "Expected size of Config::RawValue to be {} but the encoded \
-                     table specifies {}. This indicates an encoding mismatch.",
-                    size_of::<T>(),
-                    expected_size
-                )))
-            } else {
-                Ok(())
-            }
-        }
-    }
-}
-
 impl<'a, C: Config> HashTable<'a, C> {
     pub fn from_serialized(data: &[u8]) -> Result<HashTable<'_, C>, Box<dyn std::error::Error>> {
-        assert!(std::mem::align_of::<Entry<C::RawKey, C::RawValue>>() == 1);
+        let (header, raw_metadata, raw_data) = serialize::deserialize::<C>(data)?;
 
-        let header = Header::from_serialized::<C>(data)?;
-
-        let raw_metadata: &[EntryMetadata] = unsafe {
-            std::slice::from_raw_parts(
-                data.as_ptr().offset(header.metadata_offset()) as *const EntryMetadata,
-                header.capacity(),
-            )
-        };
-
-        let raw_data: &[Entry<C::RawKey, C::RawValue>] = unsafe {
-            std::slice::from_raw_parts(
-                data.as_ptr().offset(header.data_offset()) as *const Entry<C::RawKey, C::RawValue>,
-                header.capacity(),
-            )
-        };
-
-        let table = HashTable {
+        Ok(HashTable {
             _config: PhantomData::default(),
             raw_metadata,
             raw_data,
-            mod_mask: header.capacity() - 1,
+            mod_mask: header.mod_mask(),
             item_count: header.item_count(),
-        };
-
-        table.as_raw().sanity_check_hashes(3)?;
-
-        Ok(table)
+        })
     }
 
     #[inline]
@@ -449,6 +350,18 @@ impl<'a, C: Config> Iterator for Iter<'a, C> {
             (key, value)
         })
     }
+}
+
+fn slots_needed(item_count: usize, max_load_factor_percent: u8) -> usize {
+    let max_load_factor_percent = max_load_factor_percent as usize;
+    // Note: we round up here
+    (100 * item_count + max_load_factor_percent - 1) / max_load_factor_percent
+}
+
+fn max_item_count(capacity: usize, max_load_factor_percent: u8) -> usize {
+    let max_load_factor_percent = max_load_factor_percent as usize;
+    // Note: we round down here
+    (max_load_factor_percent * capacity) / 100
 }
 
 #[cfg(test)]
@@ -516,7 +429,7 @@ mod tests {
     fn from_iterator() {
         for count in 0..33 {
             let items = make_test_items(count);
-            let table = HashTableBuilder::<TestConfig>::from_iterator(items.clone(), 0.95);
+            let table = HashTableOwned::<TestConfig>::from_iterator(items.clone(), 95);
             assert_eq!(table.len(), items.len());
 
             let mut actual_items: Vec<_> = table.iter().collect();
@@ -531,8 +444,8 @@ mod tests {
         let items = make_test_items(33);
 
         let mut serialized = {
-            let table: HashTableBuilder<TestConfig> =
-                HashTableBuilder::from_iterator(items.clone(), 0.95);
+            let table: HashTableOwned<TestConfig> =
+                HashTableOwned::from_iterator(items.clone(), 95);
 
             assert_eq!(table.len(), items.len());
 
@@ -556,5 +469,19 @@ mod tests {
 
             serialized.insert(0, 0xFFu8);
         }
+    }
+
+    #[test]
+    fn load_factor_and_item_count() {
+        assert_eq!(slots_needed(0, 100), 0);
+        assert_eq!(slots_needed(6, 60), 10);
+        assert_eq!(slots_needed(5, 50), 10);
+        assert_eq!(slots_needed(5, 49), 11);
+        assert_eq!(slots_needed(1000, 100), 1000);
+
+        assert_eq!(max_item_count(1, 100), 1);
+        assert_eq!(max_item_count(10, 50), 5);
+        assert_eq!(max_item_count(11, 50), 5);
+        assert_eq!(max_item_count(12, 50), 6);
     }
 }

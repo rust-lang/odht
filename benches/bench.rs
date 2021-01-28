@@ -4,7 +4,7 @@ extern crate test;
 
 use std::io::Cursor;
 
-use odht::{Config, FxHashFn, HashTable, HashTableBuilder};
+use odht::{Config, FxHashFn, HashTable, HashTableOwned};
 use rustc_hash::FxHashMap;
 
 #[repr(C)]
@@ -54,8 +54,8 @@ fn index_contained(i: usize) -> bool {
 
 fn generate_hash_table(
     test_data: &[(TestKey, u32)],
-    load_factor: f32,
-) -> HashTableBuilder<FxConfig> {
+    load_factor_percent: u8,
+) -> HashTableOwned<FxConfig> {
     let values: Vec<_> = test_data
         .iter()
         .enumerate()
@@ -63,7 +63,7 @@ fn generate_hash_table(
         .map(|(_, x)| x)
         .collect();
 
-    let mut table = HashTableBuilder::with_capacity(values.len(), load_factor);
+    let mut table = HashTableOwned::with_capacity(values.len(), load_factor_percent);
 
     for (key, value) in values {
         table.insert(key, value);
@@ -97,9 +97,9 @@ fn generate_test_data(num_values: usize) -> Vec<(TestKey, u32)> {
         .collect()
 }
 
-fn bench_odht_fx_lookup(b: &mut test::Bencher, num_values: usize, load_factor: f32) {
+fn bench_odht_fx_lookup(b: &mut test::Bencher, num_values: usize, load_factor_percent: u8) {
     let test_data = crate::generate_test_data(num_values);
-    let table = crate::generate_hash_table(&test_data, load_factor);
+    let table = crate::generate_hash_table(&test_data, load_factor_percent);
 
     let mut serialized = {
         let mut data = Cursor::new(Vec::new());
@@ -148,27 +148,27 @@ macro_rules! bench {
         mod $name {
             #[bench]
             fn odht_fx_lookup_load_50(b: &mut test::Bencher) {
-                crate::bench_odht_fx_lookup(b, $num_values, 0.5);
+                crate::bench_odht_fx_lookup(b, $num_values, 50);
             }
 
             #[bench]
             fn odht_fx_lookup_load_70(b: &mut test::Bencher) {
-                crate::bench_odht_fx_lookup(b, $num_values, 0.7);
+                crate::bench_odht_fx_lookup(b, $num_values, 70);
             }
 
             #[bench]
             fn odht_fx_lookup_load_80(b: &mut test::Bencher) {
-                crate::bench_odht_fx_lookup(b, $num_values, 0.8);
+                crate::bench_odht_fx_lookup(b, $num_values, 80);
             }
 
             #[bench]
             fn odht_fx_lookup_load_90(b: &mut test::Bencher) {
-                crate::bench_odht_fx_lookup(b, $num_values, 0.9);
+                crate::bench_odht_fx_lookup(b, $num_values, 90);
             }
 
             #[bench]
             fn odht_fx_lookup_load_95(b: &mut test::Bencher) {
-                crate::bench_odht_fx_lookup(b, $num_values, 0.95);
+                crate::bench_odht_fx_lookup(b, $num_values, 95);
             }
 
             #[bench]
