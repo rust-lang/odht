@@ -454,6 +454,22 @@ impl_byte_array!(13);
 impl_byte_array!(14);
 impl_byte_array!(15);
 impl_byte_array!(16);
+impl_byte_array!(17);
+impl_byte_array!(18);
+impl_byte_array!(19);
+impl_byte_array!(20);
+impl_byte_array!(21);
+impl_byte_array!(22);
+impl_byte_array!(23);
+impl_byte_array!(24);
+impl_byte_array!(25);
+impl_byte_array!(26);
+impl_byte_array!(27);
+impl_byte_array!(28);
+impl_byte_array!(29);
+impl_byte_array!(30);
+impl_byte_array!(31);
+impl_byte_array!(32);
 
 #[cfg(test)]
 #[rustfmt::skip]
