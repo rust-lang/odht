@@ -23,15 +23,15 @@
 //!     type Key = u64;
 //!     type Value = u32;
 //!
-//!     type RawKey = [u8; 8];
-//!     type RawValue = [u8; 4];
+//!     type EncodedKey = [u8; 8];
+//!     type EncodedValue = [u8; 4];
 //!
 //!     type H = FxHashFn;
 //!
-//!     #[inline] fn encode_key(k: &Self::Key) -> Self::RawKey { k.to_le_bytes() }
-//!     #[inline] fn encode_value(v: &Self::Value) -> Self::RawValue { v.to_le_bytes() }
-//!     #[inline] fn decode_key(k: &Self::RawKey) -> Self::Key { u64::from_le_bytes(*k) }
-//!     #[inline] fn decode_value(v: &Self::RawValue) -> Self::Value { u32::from_le_bytes(*v)}
+//!     #[inline] fn encode_key(k: &Self::Key) -> Self::EncodedKey { k.to_le_bytes() }
+//!     #[inline] fn encode_value(v: &Self::Value) -> Self::EncodedValue { v.to_le_bytes() }
+//!     #[inline] fn decode_key(k: &Self::EncodedKey) -> Self::Key { u64::from_le_bytes(*k) }
+//!     #[inline] fn decode_value(v: &Self::EncodedValue) -> Self::Value { u32::from_le_bytes(*v)}
 //! }
 //!
 //! fn main() {
@@ -81,23 +81,23 @@ pub trait Config {
     type Key;
     type Value;
 
-    // The RawKey and RawValue types must always be a fixed size array of bytes,
+    // The EncodedKey and EncodedValue types must always be a fixed size array of bytes,
     // e.g. [u8; 4].
-    type RawKey: ByteArray;
-    type RawValue: ByteArray;
+    type EncodedKey: ByteArray;
+    type EncodedValue: ByteArray;
 
     type H: HashFn;
 
     /// Implementations of the `encode_key` and `encode_value` methods must encode
     /// the given key/value into a fixed size array. See above for requirements.
-    fn encode_key(k: &Self::Key) -> Self::RawKey;
+    fn encode_key(k: &Self::Key) -> Self::EncodedKey;
 
     /// Implementations of the `encode_key` and `encode_value` methods must encode
     /// the given key/value into a fixed size array. See above for requirements.
-    fn encode_value(v: &Self::Value) -> Self::RawValue;
+    fn encode_value(v: &Self::Value) -> Self::EncodedValue;
 
-    fn decode_key(k: &Self::RawKey) -> Self::Key;
-    fn decode_value(v: &Self::RawValue) -> Self::Value;
+    fn decode_key(k: &Self::EncodedKey) -> Self::Key;
+    fn decode_value(v: &Self::EncodedValue) -> Self::Value;
 }
 
 /// This trait represents hash functions as used by HashTable and
@@ -110,8 +110,8 @@ pub trait HashFn: Eq {
 /// does provide methods for looking up values but
 pub struct HashTableOwned<C: Config> {
     _config: PhantomData<C>,
-    raw_metadata: Vec<EntryMetadata>,
-    raw_data: Vec<Entry<C::RawKey, C::RawValue>>,
+    entry_metadata: Vec<EntryMetadata>,
+    entry_data: Vec<Entry<C::EncodedKey, C::EncodedValue>>,
     mod_mask: usize,
 
     max_item_count: usize,
@@ -136,8 +136,8 @@ impl<C: Config> HashTableOwned<C> {
 
         HashTableOwned {
             _config: PhantomData::default(),
-            raw_metadata: vec![EntryMetadata::default(); slots_needed],
-            raw_data: vec![Entry::default(); slots_needed],
+            entry_metadata: vec![EntryMetadata::default(); slots_needed],
+            entry_data: vec![Entry::default(); slots_needed],
             mod_mask,
             max_load_factor_percent,
             max_item_count,
@@ -148,8 +148,8 @@ impl<C: Config> HashTableOwned<C> {
     /// Retrieves the value for the given key. Returns `None` if no entry is found.
     #[inline]
     pub fn get(&self, key: &C::Key) -> Option<C::Value> {
-        let raw_key = C::encode_key(key);
-        self.as_raw().find(&raw_key).map(C::decode_value)
+        let encoded_key = C::encode_key(key);
+        self.as_raw().find(&encoded_key).map(C::decode_value)
     }
 
     /// Inserts the given key-value pair into the table.
@@ -162,17 +162,17 @@ impl<C: Config> HashTableOwned<C> {
 
         assert!(self.item_count < self.max_item_count);
 
-        let raw_key = C::encode_key(key);
+        let encoded_key = C::encode_key(key);
         let raw_value = C::encode_value(value);
 
-        if self.as_raw_mut().insert(raw_key, raw_value) {
+        if self.as_raw_mut().insert(encoded_key, raw_value) {
             self.item_count += 1;
         }
     }
 
     #[inline]
     pub fn iter(&self) -> Iter<'_, C> {
-        Iter(RawIter::new(&self.raw_metadata[..], &self.raw_data[..]))
+        Iter(RawIter::new(&self.entry_metadata[..], &self.entry_data[..]))
     }
 
     pub fn from_iterator<I: IntoIterator<Item = (C::Key, C::Value)>>(
@@ -195,14 +195,14 @@ impl<C: Config> HashTableOwned<C> {
         if let Some(known_size) = known_size {
             let mut table = HashTableOwned::with_capacity(known_size, max_load_factor_percent);
 
-            let initial_slot_count = table.raw_data.len();
+            let initial_slot_count = table.entry_data.len();
 
             for (k, v) in it {
                 table.insert(&k, &v);
             }
 
             assert_eq!(table.len(), known_size);
-            assert_eq!(table.raw_data.len(), initial_slot_count);
+            assert_eq!(table.entry_data.len(), initial_slot_count);
 
             table
         } else {
@@ -212,15 +212,19 @@ impl<C: Config> HashTableOwned<C> {
     }
 
     #[inline]
-    fn as_raw(&self) -> RawTable<'_, C::RawKey, C::RawValue, C::H> {
-        RawTable::new(&self.raw_metadata[..], &self.raw_data[..], self.mod_mask)
+    fn as_raw(&self) -> RawTable<'_, C::EncodedKey, C::EncodedValue, C::H> {
+        RawTable::new(
+            &self.entry_metadata[..],
+            &self.entry_data[..],
+            self.mod_mask,
+        )
     }
 
     #[inline]
-    fn as_raw_mut(&mut self) -> RawTableMut<'_, C::RawKey, C::RawValue, C::H> {
+    fn as_raw_mut(&mut self) -> RawTableMut<'_, C::EncodedKey, C::EncodedValue, C::H> {
         RawTableMut::new(
-            &mut self.raw_metadata[..],
-            &mut self.raw_data[..],
+            &mut self.entry_metadata[..],
+            &mut self.entry_data[..],
             self.mod_mask,
         )
     }
@@ -233,8 +237,8 @@ impl<C: Config> HashTableOwned<C> {
         {
             let mut new_table = new_table.as_raw_mut();
 
-            for (raw_metadata, raw_data) in self.as_raw().iter() {
-                new_table.insert_entry(raw_metadata, *raw_data);
+            for (entry_metadata, entry_data) in self.as_raw().iter() {
+                new_table.insert_entry(entry_metadata, *entry_data);
             }
         }
 
@@ -243,8 +247,8 @@ impl<C: Config> HashTableOwned<C> {
 
     pub fn serialize(&self, w: &mut dyn std::io::Write) -> Result<(), Box<dyn std::error::Error>> {
         serialize::serialize::<C>(
-            &self.raw_metadata,
-            &self.raw_data,
+            &self.entry_metadata,
+            &self.entry_data,
             self.item_count,
             self.max_load_factor_percent,
             w,
@@ -252,21 +256,21 @@ impl<C: Config> HashTableOwned<C> {
     }
 
     pub fn serialize_to_vec(&self) -> Vec<u8> {
-        let bytes_needed = serialize::bytes_needed::<C>(self.raw_metadata.len());
+        let bytes_needed = serialize::bytes_needed::<C>(self.entry_metadata.len());
         let mut cursor = Cursor::new(Vec::with_capacity(bytes_needed));
         self.serialize(&mut cursor).unwrap();
         cursor.into_inner()
     }
 
     pub fn from_serialized(data: &[u8]) -> Result<HashTableOwned<C>, Box<dyn std::error::Error>> {
-        let (header, raw_metadata, raw_data) = serialize::deserialize::<C>(data)?;
+        let (header, entry_metadata, entry_data) = serialize::deserialize::<C>(data)?;
 
         let max_load_factor_percent = header.max_load_factor_percent();
 
         Ok(HashTableOwned {
             _config: PhantomData::default(),
-            raw_metadata: raw_metadata.to_owned(),
-            raw_data: raw_data.to_owned(),
+            entry_metadata: entry_metadata.to_owned(),
+            entry_data: entry_data.to_owned(),
             mod_mask: header.mod_mask(),
             item_count: header.item_count(),
             max_load_factor_percent,
@@ -296,20 +300,20 @@ impl<C: Config> std::fmt::Debug for HashTableOwned<C> {
 /// hash table.
 pub struct HashTable<'a, C: Config> {
     _config: PhantomData<C>,
-    raw_metadata: &'a [EntryMetadata],
-    raw_data: &'a [Entry<C::RawKey, C::RawValue>],
+    entry_metadata: &'a [EntryMetadata],
+    entry_data: &'a [Entry<C::EncodedKey, C::EncodedValue>],
     mod_mask: usize,
     item_count: usize,
 }
 
 impl<'a, C: Config> HashTable<'a, C> {
     pub fn from_serialized(data: &[u8]) -> Result<HashTable<'_, C>, Box<dyn std::error::Error>> {
-        let (header, raw_metadata, raw_data) = serialize::deserialize::<C>(data)?;
+        let (header, entry_metadata, entry_data) = serialize::deserialize::<C>(data)?;
 
         Ok(HashTable {
             _config: PhantomData::default(),
-            raw_metadata,
-            raw_data,
+            entry_metadata,
+            entry_data,
             mod_mask: header.mod_mask(),
             item_count: header.item_count(),
         })
@@ -322,22 +326,22 @@ impl<'a, C: Config> HashTable<'a, C> {
 
     #[inline]
     pub fn get(&self, key: &C::Key) -> Option<C::Value> {
-        let raw_key = C::encode_key(key);
-        self.as_raw().find(&raw_key).map(C::decode_value)
+        let encoded_key = C::encode_key(key);
+        self.as_raw().find(&encoded_key).map(C::decode_value)
     }
 
     #[inline]
-    fn as_raw(&self) -> RawTable<'_, C::RawKey, C::RawValue, C::H> {
-        RawTable::new(self.raw_metadata, self.raw_data, self.mod_mask)
+    fn as_raw(&self) -> RawTable<'_, C::EncodedKey, C::EncodedValue, C::H> {
+        RawTable::new(self.entry_metadata, self.entry_data, self.mod_mask)
     }
 
     #[inline]
     pub fn iter(&self) -> Iter<'_, C> {
-        Iter(RawIter::new(self.raw_metadata, self.raw_data))
+        Iter(RawIter::new(self.entry_metadata, self.entry_data))
     }
 }
 
-pub struct Iter<'a, C: Config>(RawIter<'a, C::RawKey, C::RawValue>);
+pub struct Iter<'a, C: Config>(RawIter<'a, C::EncodedKey, C::EncodedValue>);
 
 impl<'a, C: Config> Iterator for Iter<'a, C> {
     type Item = (C::Key, C::Value);
@@ -374,27 +378,27 @@ mod tests {
     enum TestConfig {}
 
     impl Config for TestConfig {
-        type RawKey = [u8; 4];
-        type RawValue = [u8; 4];
+        type EncodedKey = [u8; 4];
+        type EncodedValue = [u8; 4];
 
         type Key = u32;
         type Value = u32;
 
         type H = FxHashFn;
 
-        fn encode_key(k: &Self::Key) -> Self::RawKey {
+        fn encode_key(k: &Self::Key) -> Self::EncodedKey {
             k.to_le_bytes()
         }
 
-        fn encode_value(v: &Self::Value) -> Self::RawValue {
+        fn encode_value(v: &Self::Value) -> Self::EncodedValue {
             v.to_le_bytes()
         }
 
-        fn decode_key(k: &Self::RawKey) -> Self::Key {
+        fn decode_key(k: &Self::EncodedKey) -> Self::Key {
             u32::from_le_bytes(k[..].try_into().unwrap())
         }
 
-        fn decode_value(v: &Self::RawValue) -> Self::Value {
+        fn decode_value(v: &Self::EncodedValue) -> Self::Value {
             u32::from_le_bytes(v[..].try_into().unwrap())
         }
     }

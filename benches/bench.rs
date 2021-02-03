@@ -17,13 +17,13 @@ impl Config for FxConfig {
     type Key = TestKey;
     type Value = u32;
 
-    type RawKey = [u8; 16];
-    type RawValue = [u8; 4];
+    type EncodedKey = [u8; 16];
+    type EncodedValue = [u8; 4];
 
     type H = FxHashFn;
 
     #[inline]
-    fn encode_key(k: &Self::Key) -> Self::RawKey {
+    fn encode_key(k: &Self::Key) -> Self::EncodedKey {
         let mut result = [0u8; 16];
 
         result[0..8].copy_from_slice(&k.0.to_le_bytes());
@@ -33,17 +33,17 @@ impl Config for FxConfig {
     }
 
     #[inline]
-    fn encode_value(v: &Self::Value) -> Self::RawValue {
+    fn encode_value(v: &Self::Value) -> Self::EncodedValue {
         v.to_le_bytes()
     }
 
     #[inline]
-    fn decode_key(_k: &Self::RawKey) -> Self::Key {
+    fn decode_key(_k: &Self::EncodedKey) -> Self::Key {
         panic!()
     }
 
     #[inline]
-    fn decode_value(v: &Self::RawValue) -> Self::Value {
+    fn decode_value(v: &Self::EncodedValue) -> Self::Value {
         u32::from_le_bytes(*v)
     }
 }

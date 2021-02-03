@@ -39,8 +39,8 @@ impl Header {
         Header {
             tag: HEADER_TAG,
             size_of_metadata: size_of::<EntryMetadata>().try_into().unwrap(),
-            size_of_key: size_of::<C::RawKey>().try_into().unwrap(),
-            size_of_value: size_of::<C::RawValue>().try_into().unwrap(),
+            size_of_key: size_of::<C::EncodedKey>().try_into().unwrap(),
+            size_of_value: size_of::<C::EncodedValue>().try_into().unwrap(),
             size_of_header: size_of::<Header>().try_into().unwrap(),
             max_load_factor_percent: max_load_factor_percent.try_into().unwrap(),
             padding: [0u8; 7],
@@ -96,12 +96,12 @@ impl Header {
         }
 
         check_expected_size::<EntryMetadata>(header.size_of_metadata)?;
-        check_expected_size::<C::RawKey>(header.size_of_key)?;
-        check_expected_size::<C::RawValue>(header.size_of_value)?;
+        check_expected_size::<C::EncodedKey>(header.size_of_key)?;
+        check_expected_size::<C::EncodedValue>(header.size_of_value)?;
         check_expected_size::<Header>(header.size_of_header)?;
 
         let bytes_per_entry =
-            size_of::<Entry<C::RawKey, C::RawValue>>() + size_of::<EntryMetadata>();
+            size_of::<Entry<C::EncodedKey, C::EncodedValue>>() + size_of::<EntryMetadata>();
 
         if data.len() < HEADER_SIZE + header.slot_count() * bytes_per_entry {
             return Err(Error(format!(
@@ -136,7 +136,7 @@ impl Header {
 
 pub(crate) fn serialize<C: Config>(
     metadata: &[EntryMetadata],
-    entry_data: &[Entry<C::RawKey, C::RawValue>],
+    entry_data: &[Entry<C::EncodedKey, C::EncodedValue>],
     item_count: usize,
     max_load_factor_percent: u8,
     w: &mut dyn std::io::Write,
@@ -156,9 +156,15 @@ pub(crate) fn serialize<C: Config>(
 
 pub(crate) fn deserialize<C: Config>(
     data: &[u8],
-) -> Result<(&Header, &[EntryMetadata], &[Entry<C::RawKey, C::RawValue>]), Box<dyn std::error::Error>>
-{
-    assert!(align_of::<Entry<C::RawKey, C::RawValue>>() == 1);
+) -> Result<
+    (
+        &Header,
+        &[EntryMetadata],
+        &[Entry<C::EncodedKey, C::EncodedValue>],
+    ),
+    Box<dyn std::error::Error>,
+> {
+    assert!(align_of::<Entry<C::EncodedKey, C::EncodedValue>>() == 1);
     assert!(align_of::<EntryMetadata>() == 1);
 
     let header = Header::from_serialized::<C>(data)?;
@@ -170,14 +176,15 @@ pub(crate) fn deserialize<C: Config>(
         )
     };
 
-    let raw_data: &[Entry<C::RawKey, C::RawValue>] = unsafe {
+    let raw_data: &[Entry<C::EncodedKey, C::EncodedValue>] = unsafe {
         std::slice::from_raw_parts(
-            data.as_ptr().offset(header.data_offset()) as *const Entry<C::RawKey, C::RawValue>,
+            data.as_ptr().offset(header.data_offset())
+                as *const Entry<C::EncodedKey, C::EncodedValue>,
             header.slot_count(),
         )
     };
 
-    let raw_table = RawTable::<'_, C::RawKey, C::RawValue, C::H>::new(
+    let raw_table = RawTable::<'_, C::EncodedKey, C::EncodedValue, C::H>::new(
         raw_metadata,
         raw_data,
         header.mod_mask(),
@@ -197,6 +204,7 @@ fn as_byte_slice<T>(slice: &[T]) -> &[u8] {
 }
 
 pub(crate) fn bytes_needed<C: Config>(capacity: usize) -> usize {
-    let bytes_per_entry = size_of::<EntryMetadata>() + size_of::<Entry<C::RawKey, C::RawValue>>();
+    let bytes_per_entry =
+        size_of::<EntryMetadata>() + size_of::<Entry<C::EncodedKey, C::EncodedValue>>();
     HEADER_SIZE + bytes_per_entry * capacity
 }
