@@ -23,6 +23,20 @@ use std::{
     mem::{align_of, size_of},
 };
 
+#[cfg(feature = "nightly")]
+macro_rules! likely {
+    ($x:expr) => {
+        core::intrinsics::likely($x)
+    };
+}
+
+#[cfg(not(feature = "nightly"))]
+macro_rules! likely {
+    ($x:expr) => {
+        $x
+    };
+}
+
 /// Values of this type represent key-value pairs *as they are stored on-disk*.
 /// `#[repr(C)]` makes sure we have deterministic field order and the fields
 /// being byte arrays makes sure that there are no padding bytes, alignment is
@@ -209,7 +223,7 @@ where
             if h.hash() == search_hash {
                 let entry = &self.data[i];
 
-                if *key == entry.key {
+                if likely!(key.equals(&entry.key)) {
                     return Some(&entry.value);
                 }
             }
@@ -339,7 +353,7 @@ where
             } else if hash_slot.hash() == new_entry_metadata.hash() {
                 let entry_slot = &mut self.data[i];
 
-                if entry_slot.key == new_entry.key {
+                if likely!(entry_slot.key.equals(&new_entry.key)) {
                     debug_assert!(hash_slot.hash() == new_entry_metadata.hash());
                     entry_slot.value = new_entry.value;
                     return false;
@@ -424,6 +438,7 @@ pub trait ByteArray:
     Sized + Copy + Eq + Clone + PartialEq + Default + fmt::Debug + 'static
 {
     fn as_slice(&self) -> &[u8];
+    fn equals(&self, other: &Self) -> bool;
 }
 
 macro_rules! impl_byte_array {
@@ -432,6 +447,35 @@ macro_rules! impl_byte_array {
             #[inline(always)]
             fn as_slice(&self) -> &[u8] {
                 &self[..]
+            }
+
+            // This custom implementation of comparing the fixed size arrays
+            // seems make a big difference for performance (at least for
+            // 16+ byte keys)
+            #[inline]
+            fn equals(&self, other: &Self) -> bool {
+                // Most branches here are optimized away at compile time
+                // because they depend on values known at compile time.
+
+                let u64s = std::mem::size_of::<Self>() / 8;
+
+                for i in 0 .. u64s {
+                    let offset = i * 8;
+                    let left = read_u64(&self[offset .. offset +8]);
+                    let right = read_u64(&other[offset .. offset +8]);
+
+                    if left != right {
+                        return false;
+                    }
+                }
+
+                return &self[u64s * 8 ..] == &other[u64s * 8 ..];
+
+                #[inline]
+                fn read_u64(bytes: &[u8]) -> u64 {
+                    use std::convert::TryInto;
+                    u64::from_le_bytes(bytes[..8].try_into().unwrap())
+                }
             }
         }
     };

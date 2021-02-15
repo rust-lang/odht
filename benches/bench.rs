@@ -97,6 +97,8 @@ fn generate_test_data(num_values: usize) -> Vec<(TestKey, u32)> {
         .collect()
 }
 
+const ITERATIONS: usize = 1000;
+
 fn bench_odht_fx_lookup(b: &mut test::Bencher, num_values: usize, load_factor_percent: u8) {
     let test_data = crate::generate_test_data(num_values);
     let table = crate::generate_hash_table(&test_data, load_factor_percent);
@@ -114,7 +116,7 @@ fn bench_odht_fx_lookup(b: &mut test::Bencher, num_values: usize, load_factor_pe
     let table = HashTable::<FxConfig>::from_serialized(&serialized[1..]).unwrap();
 
     b.iter(|| {
-        for _ in 0..100 {
+        for _ in 0..ITERATIONS {
             for (index, &(key, value)) in test_data.iter().enumerate() {
                 if index_contained(index) {
                     assert!(table.get(&key) == Some(value));
@@ -131,7 +133,7 @@ fn bench_std_fx_lookup(b: &mut test::Bencher, num_values: usize) {
     let table = crate::generate_std_hash_table(&test_data);
 
     b.iter(|| {
-        for _ in 0..100 {
+        for _ in 0..ITERATIONS {
             for (index, (key, value)) in test_data.iter().enumerate() {
                 if index_contained(index) {
                     assert!(table.get(key) == Some(value));

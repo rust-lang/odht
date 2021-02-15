@@ -55,6 +55,8 @@
 //! }
 //! ```
 
+#![cfg_attr(feature = "nightly", feature(core_intrinsics))]
+
 mod error;
 mod fxhash;
 mod raw_table;
