@@ -459,17 +459,17 @@ macro_rules! impl_byte_array {
 
                 let u64s = std::mem::size_of::<Self>() / 8;
 
-                for i in 0 .. u64s {
+                for i in 0..u64s {
                     let offset = i * 8;
-                    let left = read_u64(&self[offset .. offset +8]);
-                    let right = read_u64(&other[offset .. offset +8]);
+                    let left = read_u64(&self[offset..offset + 8]);
+                    let right = read_u64(&other[offset..offset + 8]);
 
                     if left != right {
                         return false;
                     }
                 }
 
-                return &self[u64s * 8 ..] == &other[u64s * 8 ..];
+                return &self[u64s * 8..] == &other[u64s * 8..];
 
                 #[inline]
                 fn read_u64(bytes: &[u8]) -> u64 {
