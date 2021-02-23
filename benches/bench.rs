@@ -2,8 +2,6 @@
 
 extern crate test;
 
-use std::io::Cursor;
-
 use odht::{Config, FxHashFn, HashTable, HashTableOwned};
 use rustc_hash::FxHashMap;
 
@@ -104,17 +102,13 @@ fn bench_odht_fx_lookup(b: &mut test::Bencher, num_values: usize, load_factor_pe
     let test_data = crate::generate_test_data(num_values);
     let table = crate::generate_hash_table(&test_data, load_factor_percent);
 
-    let mut serialized = {
-        let mut data = Cursor::new(Vec::new());
-        table.serialize(&mut data).unwrap();
-        data.into_inner()
-    };
+    let mut serialized = table.raw_bytes().to_owned();
 
     // Shift the data so we mess up alignment. We want to test the table under
     // realistic conditions where we cannot expect any specific alignment.
     serialized.insert(0, 0xFFu8);
 
-    let table = HashTable::<FxConfig>::from_serialized(&serialized[1..]).unwrap();
+    let table = HashTable::<FxConfig>::from_raw_bytes(&serialized[1..]).unwrap();
 
     b.iter(|| {
         for _ in 0..LOOKUP_ITERATIONS {

@@ -41,13 +41,9 @@
 //!     builder.insert(&3, &4);
 //!     builder.insert(&5, &6);
 //!
-//!     let serialized: Vec<u8> = {
-//!         let mut data = std::io::Cursor::new(Vec::new());
-//!         builder.serialize(&mut data).unwrap();
-//!         data.into_inner()
-//!     };
+//!     let serialized = builder.raw_bytes().to_owned();
 //!
-//!     let table = HashTable::<MyConfig>::from_serialized(&serialized[..]).unwrap();
+//!     let table = HashTable::<MyConfig>::from_raw_bytes(&serialized[..]).unwrap();
 //!
 //!     assert_eq!(table.get(&1), Some(2));
 //!     assert_eq!(table.get(&3), Some(4));
@@ -87,16 +83,14 @@ macro_rules! unlikely {
 
 mod error;
 mod fxhash;
+mod memory_layout;
 mod raw_table;
-mod serialize;
 mod unhash;
 
 pub use crate::fxhash::FxHashFn;
 pub use crate::unhash::UnHashFn;
 
-use crate::raw_table::{ByteArray, Entry, EntryMetadata, RawIter, RawTable, RawTableMut};
-use std::io::Cursor;
-use std::marker::PhantomData;
+use crate::raw_table::{ByteArray, RawIter, RawTable, RawTableMut};
 
 /// This trait provides a complete "configuration" for a hash table, i.e. it
 /// defines the key and value types, how these are encoded and what hash
@@ -136,20 +130,10 @@ pub trait HashFn: Eq {
     fn hash(bytes: &[u8]) -> u32;
 }
 
-/// `HashTableOwned` is used building and then persisting hash tables. It
-/// does provide methods for looking up values
 #[derive(Clone)]
 pub struct HashTableOwned<C: Config> {
-    _config: PhantomData<C>,
-    entry_metadata: Vec<EntryMetadata>,
-    entry_data: Vec<Entry<C::EncodedKey, C::EncodedValue>>,
-
     max_item_count: usize,
-    item_count: usize,
-
-    // We use integer math here as not to run into any issues with
-    // platform-specific floating point math implementation.
-    max_load_factor_percent: u8,
+    allocation: memory_layout::Allocation<C, Box<[u8]>>,
 }
 
 impl<C: Config> Default for HashTableOwned<C> {
@@ -169,13 +153,11 @@ impl<C: Config> HashTableOwned<C> {
 
         let max_item_count = max_item_count(slots_needed, max_load_factor_percent);
 
+        let allocation = memory_layout::allocate(slots_needed, 0, max_load_factor_percent);
+
         HashTableOwned {
-            _config: PhantomData::default(),
-            entry_metadata: vec![EntryMetadata::default(); slots_needed],
-            entry_data: vec![Entry::default(); slots_needed],
-            max_load_factor_percent,
+            allocation,
             max_item_count,
-            item_count: 0,
         }
     }
 
@@ -190,11 +172,12 @@ impl<C: Config> HashTableOwned<C> {
     /// Grows the table if necessary.
     #[inline]
     pub fn insert(&mut self, key: &C::Key, value: &C::Value) -> Option<C::Value> {
-        if unlikely!(self.item_count == self.max_item_count) {
+        let item_count = self.allocation.header().item_count();
+        if unlikely!(item_count == self.max_item_count) {
             self.grow();
         }
 
-        assert!(self.item_count < self.max_item_count);
+        assert!(item_count < self.max_item_count);
 
         let encoded_key = C::encode_key(key);
         let raw_value = C::encode_value(value);
@@ -202,14 +185,15 @@ impl<C: Config> HashTableOwned<C> {
         if let Some(old_value) = self.as_raw_mut().insert(encoded_key, raw_value) {
             Some(C::decode_value(&old_value))
         } else {
-            self.item_count += 1;
+            self.allocation.header_mut().set_item_count(item_count + 1);
             None
         }
     }
 
     #[inline]
     pub fn iter(&self) -> Iter<'_, C> {
-        Iter(RawIter::new(&self.entry_metadata[..], &self.entry_data[..]))
+        let (entry_metadata, entry_data) = self.allocation.data_slices();
+        Iter(RawIter::new(entry_metadata, entry_data))
     }
 
     pub fn from_iterator<I: IntoIterator<Item = (C::Key, C::Value)>>(
@@ -232,14 +216,14 @@ impl<C: Config> HashTableOwned<C> {
         if let Some(known_size) = known_size {
             let mut table = HashTableOwned::with_capacity(known_size, max_load_factor_percent);
 
-            let initial_slot_count = table.entry_data.len();
+            let initial_slot_count = table.allocation.header().slot_count();
 
             for (k, v) in it {
                 table.insert(&k, &v);
             }
 
             assert_eq!(table.len(), known_size);
-            assert_eq!(table.entry_data.len(), initial_slot_count);
+            assert_eq!(table.allocation.header().slot_count(), initial_slot_count);
 
             table
         } else {
@@ -250,28 +234,25 @@ impl<C: Config> HashTableOwned<C> {
 
     #[inline]
     fn as_raw(&self) -> RawTable<'_, C::EncodedKey, C::EncodedValue, C::H> {
-        RawTable::new(
-            &self.entry_metadata[..],
-            &self.entry_data[..],
-        )
+        let (entry_metadata, entry_data) = self.allocation.data_slices();
+        RawTable::new(entry_metadata, entry_data)
     }
 
     #[inline]
     fn as_raw_mut(&mut self) -> RawTableMut<'_, C::EncodedKey, C::EncodedValue, C::H> {
-        RawTableMut::new(
-            &mut self.entry_metadata[..],
-            &mut self.entry_data[..],
-        )
+        let (entry_metadata, entry_data) = self.allocation.data_slices_mut();
+        RawTableMut::new(entry_metadata, entry_data)
     }
 
     #[inline(never)]
     #[cold]
     fn grow(&mut self) {
-        let initial_slot_count = self.entry_data.len();
-        let initial_item_count = self.item_count;
-        let initial_max_load_factor_percent = self.max_load_factor_percent;
+        let initial_slot_count = self.allocation.header().slot_count();
+        let initial_item_count = self.allocation.header().item_count();
+        let initial_max_load_factor_percent = self.allocation.header().max_load_factor_percent();
 
-        let mut new_table = Self::with_capacity(self.item_count * 2, self.max_load_factor_percent);
+        let mut new_table =
+            Self::with_capacity(initial_item_count * 2, initial_max_load_factor_percent);
 
         // Copy the entries over with the internal `insert_entry()` method,
         // which allows us to do insertions without hashing everything again.
@@ -282,55 +263,61 @@ impl<C: Config> HashTableOwned<C> {
                 new_table.insert_entry(entry_metadata, *entry_data);
             }
         }
-        // We've been working only on the RawTable in the code block above, so
-        // need to update the item_count field manually.
-        new_table.item_count = self.item_count;
+
+        new_table
+            .allocation
+            .header_mut()
+            .set_item_count(initial_item_count);
 
         *self = new_table;
 
-        assert!(self.entry_data.len() >= 2 * initial_slot_count);
-        assert_eq!(self.item_count, initial_item_count);
+        assert!(self.allocation.header().slot_count() >= 2 * initial_slot_count);
+        assert_eq!(self.allocation.header().item_count(), initial_item_count);
         assert_eq!(
-            self.max_load_factor_percent,
+            self.allocation.header().max_load_factor_percent(),
             initial_max_load_factor_percent
         );
     }
 
-    pub fn serialize(&self, w: &mut dyn std::io::Write) -> Result<(), Box<dyn std::error::Error>> {
-        serialize::serialize::<C>(
-            &self.entry_metadata,
-            &self.entry_data,
-            self.item_count,
-            self.max_load_factor_percent,
-            w,
-        )
+    #[inline]
+    pub fn raw_bytes(&self) -> &[u8] {
+        self.allocation.raw_bytes()
     }
 
-    pub fn serialize_to_vec(&self) -> Vec<u8> {
-        let bytes_needed = serialize::bytes_needed::<C>(self.entry_metadata.len());
-        let mut cursor = Cursor::new(Vec::with_capacity(bytes_needed));
-        self.serialize(&mut cursor).unwrap();
-        cursor.into_inner()
-    }
+    pub fn from_raw_bytes(data: &[u8]) -> Result<HashTableOwned<C>, Box<dyn std::error::Error>> {
+        let data = data.to_owned().into_boxed_slice();
+        let allocation = memory_layout::Allocation::from_raw_bytes(data)?;
 
-    pub fn from_serialized(data: &[u8]) -> Result<HashTableOwned<C>, Box<dyn std::error::Error>> {
-        let (header, entry_metadata, entry_data) = serialize::deserialize::<C>(data)?;
-
-        let max_load_factor_percent = header.max_load_factor_percent();
+        let max_item_count = max_item_count(
+            allocation.header().slot_count(),
+            allocation.header().max_load_factor_percent(),
+        );
 
         Ok(HashTableOwned {
-            _config: PhantomData::default(),
-            entry_metadata: entry_metadata.to_owned(),
-            entry_data: entry_data.to_owned(),
-            item_count: header.item_count(),
-            max_load_factor_percent,
-            max_item_count: max_item_count(header.slot_count(), max_load_factor_percent),
+            allocation,
+            max_item_count,
         })
     }
 
     #[inline]
+    pub unsafe fn from_raw_bytes_unchecked(data: &[u8]) -> HashTableOwned<C> {
+        let data = data.to_owned().into_boxed_slice();
+        let allocation = memory_layout::Allocation::from_raw_bytes_unchecked(data);
+
+        let max_item_count = max_item_count(
+            allocation.header().slot_count(),
+            allocation.header().max_load_factor_percent(),
+        );
+
+        HashTableOwned {
+            allocation,
+            max_item_count,
+        }
+    }
+
+    #[inline]
     pub fn len(&self) -> usize {
-        self.item_count
+        self.allocation.header().item_count()
     }
 }
 
@@ -339,7 +326,9 @@ impl<C: Config> std::fmt::Debug for HashTableOwned<C> {
         writeln!(
             f,
             "(item_count={}, max_item_count={}, max_load_factor={})",
-            self.item_count, self.max_item_count, self.max_load_factor_percent
+            self.allocation.header().item_count(),
+            self.max_item_count,
+            self.allocation.header().max_load_factor_percent(),
         )?;
 
         writeln!(f, "{:?}", self.as_raw())
@@ -350,27 +339,26 @@ impl<C: Config> std::fmt::Debug for HashTableOwned<C> {
 /// hash table.
 #[derive(Clone, Copy)]
 pub struct HashTable<'a, C: Config> {
-    _config: PhantomData<C>,
-    entry_metadata: &'a [EntryMetadata],
-    entry_data: &'a [Entry<C::EncodedKey, C::EncodedValue>],
-    item_count: usize,
+    allocation: memory_layout::Allocation<C, &'a [u8]>,
 }
 
 impl<'a, C: Config> HashTable<'a, C> {
-    pub fn from_serialized(data: &[u8]) -> Result<HashTable<'_, C>, Box<dyn std::error::Error>> {
-        let (header, entry_metadata, entry_data) = serialize::deserialize::<C>(data)?;
+    pub fn from_raw_bytes(data: &[u8]) -> Result<HashTable<'_, C>, Box<dyn std::error::Error>> {
+        let allocation = memory_layout::Allocation::from_raw_bytes(data)?;
 
-        Ok(HashTable {
-            _config: PhantomData::default(),
-            entry_metadata,
-            entry_data,
-            item_count: header.item_count(),
-        })
+        Ok(HashTable { allocation })
+    }
+
+    #[inline]
+    pub unsafe fn from_raw_bytes_unchecked(data: &[u8]) -> HashTable<'_, C> {
+        HashTable {
+            allocation: memory_layout::Allocation::from_raw_bytes_unchecked(data),
+        }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.item_count
+        self.allocation.header().item_count()
     }
 
     #[inline]
@@ -381,12 +369,14 @@ impl<'a, C: Config> HashTable<'a, C> {
 
     #[inline]
     fn as_raw(&self) -> RawTable<'_, C::EncodedKey, C::EncodedValue, C::H> {
-        RawTable::new(self.entry_metadata, self.entry_data)
+        let (entry_metadata, entry_data) = self.allocation.data_slices();
+        RawTable::new(entry_metadata, entry_data)
     }
 
     #[inline]
     pub fn iter(&self) -> Iter<'_, C> {
-        Iter(RawIter::new(self.entry_metadata, self.entry_data))
+        let (entry_metadata, entry_data) = self.allocation.data_slices();
+        Iter(RawIter::new(entry_metadata, entry_data))
     }
 }
 
@@ -405,6 +395,8 @@ impl<'a, C: Config> Iterator for Iter<'a, C> {
     }
 }
 
+// We use integer math here as not to run into any issues with
+// platform-specific floating point math implementation.
 fn slots_needed(item_count: usize, max_load_factor_percent: u8) -> usize {
     let max_load_factor_percent = max_load_factor_percent as usize;
     // Note: we round up here
@@ -419,10 +411,8 @@ fn max_item_count(capacity: usize, max_load_factor_percent: u8) -> usize {
 
 #[cfg(test)]
 mod tests {
-
-    use std::{convert::TryInto, io::Cursor};
-
     use super::*;
+    use std::convert::TryInto;
 
     enum TestConfig {}
 
@@ -502,17 +492,13 @@ mod tests {
 
             assert_eq!(table.len(), items.len());
 
-            let mut stream = Cursor::new(Vec::new());
-
-            table.serialize(&mut stream).unwrap();
-
-            stream.into_inner()
+            table.raw_bytes().to_owned()
         };
 
         for alignment_shift in 0..4 {
             let data = &serialized[alignment_shift..];
 
-            let table = HashTable::<TestConfig>::from_serialized(data).unwrap();
+            let table = HashTable::<TestConfig>::from_raw_bytes(data).unwrap();
 
             assert_eq!(table.len(), items.len());
 

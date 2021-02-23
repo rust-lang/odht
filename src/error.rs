@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Eq, PartialEq, Debug)]
 pub(crate) struct Error(pub String);
 
 impl std::error::Error for Error {}

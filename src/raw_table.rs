@@ -173,10 +173,7 @@ where
     H: HashFn,
 {
     #[inline]
-    pub(crate) fn new(
-        metadata: &'a [EntryMetadata],
-        data: &'a [Entry<K, V>],
-    ) -> Self {
+    pub(crate) fn new(metadata: &'a [EntryMetadata], data: &'a [Entry<K, V>]) -> Self {
         // Make sure Entry<K, V> does not contain any padding bytes and can be
         // stored at arbitrary adresses.
         assert!(size_of::<Entry<K, V>>() == size_of::<K>() + size_of::<V>());
@@ -282,10 +279,7 @@ where
     H: HashFn,
 {
     #[inline]
-    pub(crate) fn new(
-        metadata: &'a mut [EntryMetadata],
-        data: &'a mut [Entry<K, V>],
-    ) -> Self {
+    pub(crate) fn new(metadata: &'a mut [EntryMetadata], data: &'a mut [Entry<K, V>]) -> Self {
         // Make sure Entry<K, V> does not contain any padding bytes and can be
         // stored at arbitrary adresses.
         assert!(size_of::<Entry<K, V>>() == size_of::<K>() + size_of::<V>());
