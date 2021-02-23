@@ -57,7 +57,6 @@
 
 #![cfg_attr(feature = "nightly", feature(core_intrinsics))]
 
-
 #[cfg(feature = "nightly")]
 macro_rules! likely {
     ($x:expr) => {
@@ -98,7 +97,6 @@ pub use crate::unhash::UnHashFn;
 use crate::raw_table::{ByteArray, Entry, EntryMetadata, RawIter, RawTable, RawTableMut};
 use std::io::Cursor;
 use std::marker::PhantomData;
-
 
 /// This trait provides a complete "configuration" for a hash table, i.e. it
 /// defines the key and value types, how these are encoded and what hash
@@ -297,7 +295,10 @@ impl<C: Config> HashTableOwned<C> {
 
         assert!(self.entry_data.len() >= 2 * initial_slot_count);
         assert_eq!(self.item_count, initial_item_count);
-        assert_eq!(self.max_load_factor_percent, initial_max_load_factor_percent);
+        assert_eq!(
+            self.max_load_factor_percent,
+            initial_max_load_factor_percent
+        );
     }
 
     pub fn serialize(&self, w: &mut dyn std::io::Write) -> Result<(), Box<dyn std::error::Error>> {
