@@ -48,19 +48,20 @@ impl<K: ByteArray, V: ByteArray> Entry<K, V> {
 impl<'a, K: ByteArray, V: ByteArray, H: HashFn> fmt::Debug for RawTable<'a, K, V, H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut probe_distances = Vec::new();
+        let mod_mask = self.data.len() - 1;
 
         for (i, (metadata, entry)) in self.metadata.iter().zip(self.data.iter()).enumerate() {
             if metadata.is_empty() {
                 writeln!(f, "{:>2} -", i)?;
             } else {
-                let probe_distance = probe_distance(metadata.hash(), i, self.mod_mask);
+                let probe_distance = probe_distance(metadata.hash(), i, mod_mask);
                 probe_distances.push(probe_distance);
 
                 writeln!(
                     f,
                     "{:>2} - desired={:>2}, dist={:>2}, key: {:?}, val: {:?}",
                     i,
-                    desired_index(metadata.hash(), self.mod_mask),
+                    desired_index(metadata.hash(), mod_mask),
                     probe_distance,
                     entry.key,
                     entry.value
@@ -162,7 +163,6 @@ where
 {
     metadata: &'a [EntryMetadata],
     data: &'a [Entry<K, V>],
-    mod_mask: usize,
     _hash_fn: PhantomData<H>,
 }
 
@@ -176,19 +176,18 @@ where
     pub(crate) fn new(
         metadata: &'a [EntryMetadata],
         data: &'a [Entry<K, V>],
-        mod_mask: usize,
     ) -> Self {
         // Make sure Entry<K, V> does not contain any padding bytes and can be
         // stored at arbitrary adresses.
         assert!(size_of::<Entry<K, V>>() == size_of::<K>() + size_of::<V>());
         assert!(std::mem::align_of::<Entry<K, V>>() == 1);
 
-        debug_assert!((mod_mask + 1).is_power_of_two());
+        debug_assert!(metadata.len().is_power_of_two());
+        debug_assert_eq!(data.len(), metadata.len());
 
         Self {
             metadata,
             data,
-            mod_mask,
             _hash_fn: PhantomData::default(),
         }
     }
@@ -196,7 +195,8 @@ where
     #[inline]
     pub(crate) fn find(&self, key: &K) -> Option<&V> {
         let search_hash = make_hash::<K, H>(key);
-        let mut i = desired_index(search_hash, self.mod_mask);
+        let mod_mask = self.data.len() - 1;
+        let mut i = desired_index(search_hash, mod_mask);
         let mut search_probe_distance = 0;
 
         loop {
@@ -214,12 +214,12 @@ where
                 }
             }
 
-            if search_probe_distance > probe_distance(h.hash(), i, self.mod_mask) {
+            if search_probe_distance > probe_distance(h.hash(), i, mod_mask) {
                 return None;
             }
 
             search_probe_distance += 1;
-            i = (i + 1) & self.mod_mask;
+            i = (i + 1) & mod_mask;
         }
     }
 
@@ -272,7 +272,6 @@ where
 {
     metadata: &'a mut [EntryMetadata],
     data: &'a mut [Entry<K, V>],
-    mod_mask: usize,
     _hash_fn: PhantomData<H>,
 }
 
@@ -286,19 +285,18 @@ where
     pub(crate) fn new(
         metadata: &'a mut [EntryMetadata],
         data: &'a mut [Entry<K, V>],
-        mod_mask: usize,
     ) -> Self {
         // Make sure Entry<K, V> does not contain any padding bytes and can be
         // stored at arbitrary adresses.
         assert!(size_of::<Entry<K, V>>() == size_of::<K>() + size_of::<V>());
         assert!(std::mem::align_of::<Entry<K, V>>() == 1);
 
-        debug_assert!((mod_mask + 1).is_power_of_two());
+        debug_assert!(metadata.len().is_power_of_two());
+        debug_assert_eq!(data.len(), metadata.len());
 
         Self {
             metadata,
             data,
-            mod_mask,
             _hash_fn: PhantomData::default(),
         }
     }
@@ -325,7 +323,8 @@ where
         mut new_entry: Entry<K, V>,
     ) -> Option<V> {
         debug_assert!(!new_entry_metadata.is_empty());
-        let mut i = desired_index(new_entry_metadata.hash(), self.mod_mask);
+        let mod_mask = self.data.len() - 1;
+        let mut i = desired_index(new_entry_metadata.hash(), mod_mask);
         let mut this_probe_distance = 0;
 
         #[cfg(debug_assertions)]
@@ -350,7 +349,7 @@ where
                 }
             }
 
-            let other_probe_distance = probe_distance(hash_slot.hash(), i, self.mod_mask);
+            let other_probe_distance = probe_distance(hash_slot.hash(), i, mod_mask);
 
             if this_probe_distance > other_probe_distance {
                 std::mem::swap(&mut self.data[i], &mut new_entry);
@@ -359,7 +358,7 @@ where
             }
 
             this_probe_distance += 1;
-            i = (i + 1) & self.mod_mask;
+            i = (i + 1) & mod_mask;
 
             #[cfg(debug_assertions)]
             {
@@ -371,7 +370,7 @@ where
 
 impl<'a, K: ByteArray, V: ByteArray, H: HashFn> fmt::Debug for RawTableMut<'a, K, V, H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let readonly = RawTable::<'_, K, V, H>::new(self.metadata, self.data, self.mod_mask);
+        let readonly = RawTable::<'_, K, V, H>::new(self.metadata, self.data);
         write!(f, "{:?}", readonly)
     }
 }
@@ -534,7 +533,6 @@ mod tests {
             let mut table: RawTableMut<K, V, H> = RawTableMut {
                 metadata: &mut metadata[..],
                 data: &mut data[..],
-                mod_mask: size - 1,
                 _hash_fn: Default::default(),
             };
 
@@ -571,7 +569,6 @@ mod tests {
                 data.push(entry.1);
             })*
 
-            let mod_mask = data.len() - 1;
             let metadata = mk!($type, metadata);
             let data = mk!($type, data);
 
@@ -579,7 +576,6 @@ mod tests {
             let mut $name = $type {
                 metadata,
                 data,
-                mod_mask,
                 _hash_fn: PhantomData::<FirstByteHashFn>::default(),
             };
         };
@@ -763,7 +759,6 @@ mod tests {
         let table: RawTable<_, _, FxHashFn> = RawTable {
             metadata: &metadata[..],
             data: &data[..],
-            mod_mask: data.len() - 1,
             _hash_fn: PhantomData::default(),
         };
 

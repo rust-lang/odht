@@ -57,11 +57,6 @@ impl Header {
         u64::from_le_bytes(self.slot_count) as usize
     }
 
-    pub fn mod_mask(&self) -> usize {
-        assert!(self.slot_count().is_power_of_two());
-        self.slot_count() - 1
-    }
-
     pub fn max_load_factor_percent(&self) -> u8 {
         self.max_load_factor_percent
     }
@@ -187,7 +182,6 @@ pub(crate) fn deserialize<C: Config>(
     let raw_table = RawTable::<'_, C::EncodedKey, C::EncodedValue, C::H>::new(
         raw_metadata,
         raw_data,
-        header.mod_mask(),
     );
     raw_table.sanity_check_hashes(3)?;
 

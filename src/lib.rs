@@ -143,7 +143,6 @@ pub struct HashTableOwned<C: Config> {
     _config: PhantomData<C>,
     entry_metadata: Vec<EntryMetadata>,
     entry_data: Vec<Entry<C::EncodedKey, C::EncodedValue>>,
-    mod_mask: usize,
 
     max_item_count: usize,
     item_count: usize,
@@ -168,14 +167,12 @@ impl<C: Config> HashTableOwned<C> {
         let slots_needed = slots_needed.checked_next_power_of_two().unwrap();
         assert!(slots_needed > 0);
 
-        let mod_mask = slots_needed.checked_sub(1).unwrap();
         let max_item_count = max_item_count(slots_needed, max_load_factor_percent);
 
         HashTableOwned {
             _config: PhantomData::default(),
             entry_metadata: vec![EntryMetadata::default(); slots_needed],
             entry_data: vec![Entry::default(); slots_needed],
-            mod_mask,
             max_load_factor_percent,
             max_item_count,
             item_count: 0,
@@ -256,7 +253,6 @@ impl<C: Config> HashTableOwned<C> {
         RawTable::new(
             &self.entry_metadata[..],
             &self.entry_data[..],
-            self.mod_mask,
         )
     }
 
@@ -265,7 +261,6 @@ impl<C: Config> HashTableOwned<C> {
         RawTableMut::new(
             &mut self.entry_metadata[..],
             &mut self.entry_data[..],
-            self.mod_mask,
         )
     }
 
@@ -327,7 +322,6 @@ impl<C: Config> HashTableOwned<C> {
             _config: PhantomData::default(),
             entry_metadata: entry_metadata.to_owned(),
             entry_data: entry_data.to_owned(),
-            mod_mask: header.mod_mask(),
             item_count: header.item_count(),
             max_load_factor_percent,
             max_item_count: max_item_count(header.slot_count(), max_load_factor_percent),
@@ -344,8 +338,8 @@ impl<C: Config> std::fmt::Debug for HashTableOwned<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
-            "(item_count={}, mod_mask={:x}, max_item_count={}, max_load_factor={})",
-            self.item_count, self.mod_mask, self.max_item_count, self.max_load_factor_percent
+            "(item_count={}, max_item_count={}, max_load_factor={})",
+            self.item_count, self.max_item_count, self.max_load_factor_percent
         )?;
 
         writeln!(f, "{:?}", self.as_raw())
@@ -359,7 +353,6 @@ pub struct HashTable<'a, C: Config> {
     _config: PhantomData<C>,
     entry_metadata: &'a [EntryMetadata],
     entry_data: &'a [Entry<C::EncodedKey, C::EncodedValue>],
-    mod_mask: usize,
     item_count: usize,
 }
 
@@ -371,7 +364,6 @@ impl<'a, C: Config> HashTable<'a, C> {
             _config: PhantomData::default(),
             entry_metadata,
             entry_data,
-            mod_mask: header.mod_mask(),
             item_count: header.item_count(),
         })
     }
@@ -389,7 +381,7 @@ impl<'a, C: Config> HashTable<'a, C> {
 
     #[inline]
     fn as_raw(&self) -> RawTable<'_, C::EncodedKey, C::EncodedValue, C::H> {
-        RawTable::new(self.entry_metadata, self.entry_data, self.mod_mask)
+        RawTable::new(self.entry_metadata, self.entry_data)
     }
 
     #[inline]
