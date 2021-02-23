@@ -43,7 +43,9 @@
 //!
 //!     let serialized = builder.raw_bytes().to_owned();
 //!
-//!     let table = HashTable::<MyConfig>::from_raw_bytes(&serialized[..]).unwrap();
+//!     let table = HashTable::<MyConfig, &[u8]>::from_raw_bytes(
+//!         &serialized[..]
+//!     ).unwrap();
 //!
 //!     assert_eq!(table.get(&1), Some(2));
 //!     assert_eq!(table.get(&3), Some(4));
@@ -86,6 +88,8 @@ mod fxhash;
 mod memory_layout;
 mod raw_table;
 mod unhash;
+
+use std::borrow::Borrow;
 
 pub use crate::fxhash::FxHashFn;
 pub use crate::unhash::UnHashFn;
@@ -338,19 +342,19 @@ impl<C: Config> std::fmt::Debug for HashTableOwned<C> {
 /// This type provides a cheap to construct readonly view on a persisted
 /// hash table.
 #[derive(Clone, Copy)]
-pub struct HashTable<'a, C: Config> {
-    allocation: memory_layout::Allocation<C, &'a [u8]>,
+pub struct HashTable<C: Config, D: Borrow<[u8]>> {
+    allocation: memory_layout::Allocation<C, D>,
 }
 
-impl<'a, C: Config> HashTable<'a, C> {
-    pub fn from_raw_bytes(data: &[u8]) -> Result<HashTable<'_, C>, Box<dyn std::error::Error>> {
+impl<C: Config, D: Borrow<[u8]>> HashTable<C, D> {
+    pub fn from_raw_bytes(data: D) -> Result<HashTable<C, D>, Box<dyn std::error::Error>> {
         let allocation = memory_layout::Allocation::from_raw_bytes(data)?;
 
         Ok(HashTable { allocation })
     }
 
     #[inline]
-    pub unsafe fn from_raw_bytes_unchecked(data: &[u8]) -> HashTable<'_, C> {
+    pub unsafe fn from_raw_bytes_unchecked(data: D) -> HashTable<C, D> {
         HashTable {
             allocation: memory_layout::Allocation::from_raw_bytes_unchecked(data),
         }
@@ -498,7 +502,7 @@ mod tests {
         for alignment_shift in 0..4 {
             let data = &serialized[alignment_shift..];
 
-            let table = HashTable::<TestConfig>::from_raw_bytes(data).unwrap();
+            let table = HashTable::<TestConfig, _>::from_raw_bytes(data).unwrap();
 
             assert_eq!(table.len(), items.len());
 

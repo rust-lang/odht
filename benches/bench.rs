@@ -108,7 +108,7 @@ fn bench_odht_fx_lookup(b: &mut test::Bencher, num_values: usize, load_factor_pe
     // realistic conditions where we cannot expect any specific alignment.
     serialized.insert(0, 0xFFu8);
 
-    let table = HashTable::<FxConfig>::from_raw_bytes(&serialized[1..]).unwrap();
+    let table = HashTable::<FxConfig, _>::from_raw_bytes(&serialized[1..]).unwrap();
 
     b.iter(|| {
         for _ in 0..LOOKUP_ITERATIONS {
