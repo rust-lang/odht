@@ -89,7 +89,8 @@ mod memory_layout;
 mod raw_table;
 mod unhash;
 
-use std::borrow::Borrow;
+use error::Error;
+use std::borrow::{Borrow, BorrowMut};
 
 pub use crate::fxhash::FxHashFn;
 pub use crate::unhash::UnHashFn;
@@ -104,7 +105,7 @@ use crate::raw_table::{ByteArray, RawIter, RawTable, RawTableMut};
 /// the given key/value into a fixed size array. The encoding must be
 /// deterministic (i.e. no random padding bytes) and must be independent of
 /// platform endianess. It is always highly recommended to mark these methods
-/// as #[inline].
+/// as `#[inline]`.
 pub trait Config {
     type Key;
     type Value;
@@ -152,7 +153,6 @@ impl<C: Config> HashTableOwned<C> {
         assert!(max_load_factor_percent > 0);
 
         let slots_needed = slots_needed(item_count, max_load_factor_percent);
-        let slots_needed = slots_needed.checked_next_power_of_two().unwrap();
         assert!(slots_needed > 0);
 
         let max_item_count = max_item_count(slots_needed, max_load_factor_percent);
@@ -184,9 +184,9 @@ impl<C: Config> HashTableOwned<C> {
         assert!(item_count < self.max_item_count);
 
         let encoded_key = C::encode_key(key);
-        let raw_value = C::encode_value(value);
+        let encoded_value = C::encode_value(value);
 
-        if let Some(old_value) = self.as_raw_mut().insert(encoded_key, raw_value) {
+        if let Some(old_value) = self.as_raw_mut().insert(encoded_key, encoded_value) {
             Some(C::decode_value(&old_value))
         } else {
             self.allocation.header_mut().set_item_count(item_count + 1);
@@ -389,6 +389,67 @@ impl<C: Config, D: Borrow<[u8]>> HashTable<C, D> {
     }
 }
 
+impl<C: Config, D: Borrow<[u8]> + BorrowMut<[u8]>> HashTable<C, D> {
+    pub fn init_in_place(
+        mut data: D,
+        max_item_count: usize,
+        max_load_factor_percent: u8,
+    ) -> Result<HashTable<C, D>, Box<dyn std::error::Error>> {
+        let byte_count = bytes_needed::<C>(max_item_count, max_load_factor_percent);
+        if data.borrow_mut().len() != byte_count {
+            return Err(Error(format!(
+                "byte slice to initialize has wrong length ({} instead of {})",
+                data.borrow_mut().len(),
+                byte_count
+            )))?;
+        }
+
+        data.borrow_mut().fill(0);
+        let slot_count = slots_needed(max_item_count, max_load_factor_percent);
+        let allocation =
+            memory_layout::init_in_place::<C, _>(data, slot_count, 0, max_load_factor_percent);
+        Ok(HashTable { allocation })
+    }
+
+    #[inline]
+    fn as_raw_mut(&mut self) -> RawTableMut<'_, C::EncodedKey, C::EncodedValue, C::H> {
+        let (entry_metadata, entry_data) = self.allocation.data_slices_mut();
+        RawTableMut::new(entry_metadata, entry_data)
+    }
+
+    /// Inserts the given key-value pair into the table.
+    /// Unlike [HashTableOwned::insert] this method cannot grow the underlying table
+    /// if there is not enough space for the new item. Instead the call will panic.
+    #[inline]
+    pub fn insert(&mut self, key: &C::Key, value: &C::Value) -> Option<C::Value> {
+        let item_count = self.allocation.header().item_count();
+        let max_load_factor_percent = self.allocation.header().max_load_factor_percent();
+        let slot_count = self.allocation.header().slot_count();
+        // FIXME: This is actually a bit to conservative because it does not account for
+        //        cases where an entry is overwritten and thus the item count does not
+        //        change.
+        assert!(item_count < max_item_count(slot_count, max_load_factor_percent));
+
+        let encoded_key = C::encode_key(key);
+        let encoded_value = C::encode_value(value);
+
+        if let Some(old_value) = self.as_raw_mut().insert(encoded_key, encoded_value) {
+            Some(C::decode_value(&old_value))
+        } else {
+            self.allocation.header_mut().set_item_count(item_count + 1);
+            None
+        }
+    }
+}
+
+/// Computes the exact number of bytes needed for storing a HashTable with the
+/// given max item count and load factor. The result can be used for allocating
+/// storage to be passed into [HashTable::init_in_place].
+pub fn bytes_needed<C: Config>(max_item_count: usize, max_load_factor_percent: u8) -> usize {
+    let slot_count = slots_needed(max_item_count, max_load_factor_percent);
+    memory_layout::bytes_needed::<C>(slot_count)
+}
+
 pub struct Iter<'a, C: Config>(RawIter<'a, C::EncodedKey, C::EncodedValue>);
 
 impl<'a, C: Config> Iterator for Iter<'a, C> {
@@ -409,13 +470,14 @@ impl<'a, C: Config> Iterator for Iter<'a, C> {
 fn slots_needed(item_count: usize, max_load_factor_percent: u8) -> usize {
     let max_load_factor_percent = max_load_factor_percent as usize;
     // Note: we round up here
-    (100 * item_count + max_load_factor_percent - 1) / max_load_factor_percent
+    let slots_needed = (100 * item_count + max_load_factor_percent - 1) / max_load_factor_percent;
+    slots_needed.checked_next_power_of_two().unwrap()
 }
 
-fn max_item_count(capacity: usize, max_load_factor_percent: u8) -> usize {
+fn max_item_count(slot_count: usize, max_load_factor_percent: u8) -> usize {
     let max_load_factor_percent = max_load_factor_percent as usize;
     // Note: we round down here
-    (max_load_factor_percent * capacity) / 100
+    (max_load_factor_percent * slot_count) / 100
 }
 
 #[cfg(test)]
@@ -492,6 +554,33 @@ mod tests {
     }
 
     #[test]
+    fn init_in_place() {
+        for count in 0..33 {
+            let items = make_test_items(count);
+            let byte_count = bytes_needed::<TestConfig>(items.len(), 87);
+            let data = vec![0u8; byte_count];
+
+            let mut table = HashTable::<TestConfig, _>::init_in_place(data, items.len(), 87).unwrap();
+
+            for (i, (k, v)) in items.iter().enumerate() {
+                assert_eq!(table.len(), i);
+                assert_eq!(table.insert(k, v), None);
+                assert_eq!(table.len(), i + 1);
+
+                // Make sure we still can find all items previously inserted.
+                for (k, v) in items.iter().take(i) {
+                    assert_eq!(table.get(k), Some(*v));
+                }
+            }
+
+            let mut actual_items: Vec<_> = table.iter().collect();
+            actual_items.sort();
+
+            assert_eq!(items, actual_items);
+        }
+    }
+
+    #[test]
     fn hash_table_at_different_alignments() {
         let items = make_test_items(33);
 
@@ -521,11 +610,11 @@ mod tests {
 
     #[test]
     fn load_factor_and_item_count() {
-        assert_eq!(slots_needed(0, 100), 0);
-        assert_eq!(slots_needed(6, 60), 10);
-        assert_eq!(slots_needed(5, 50), 10);
-        assert_eq!(slots_needed(5, 49), 11);
-        assert_eq!(slots_needed(1000, 100), 1000);
+        assert_eq!(slots_needed(0, 100), 1);
+        assert_eq!(slots_needed(6, 60), 16);
+        assert_eq!(slots_needed(5, 50), 16);
+        assert_eq!(slots_needed(5, 49), 16);
+        assert_eq!(slots_needed(1000, 100), 1024);
 
         assert_eq!(max_item_count(1, 100), 1);
         assert_eq!(max_item_count(10, 50), 5);

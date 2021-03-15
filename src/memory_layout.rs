@@ -307,6 +307,7 @@ where
 
 #[inline]
 pub(crate) fn bytes_needed<C: Config>(slot_count: usize) -> usize {
+    assert!(slot_count.is_power_of_two());
     let size_of_entry = size_of::<Entry<C::EncodedKey, C::EncodedValue>>();
     let size_of_metadata = size_of::<EntryMetadata>();
 
@@ -318,10 +319,20 @@ pub(crate) fn allocate<C: Config>(
     item_count: usize,
     max_load_factor_percent: u8,
 ) -> Allocation<C, Box<[u8]>> {
-    let mut bytes = vec![0u8; bytes_needed::<C>(slot_count)].into_boxed_slice();
+    let bytes = vec![0u8; bytes_needed::<C>(slot_count)].into_boxed_slice();
+    init_in_place::<C, _>(bytes, slot_count, item_count, max_load_factor_percent)
+}
+
+pub(crate) fn init_in_place<C: Config, M: BorrowMut<[u8]>>(
+    mut bytes: M,
+    slot_count: usize,
+    item_count: usize,
+    max_load_factor_percent: u8,
+) -> Allocation<C, M> {
+    debug_assert!(bytes.borrow_mut().iter().all(|b| *b == 0));
 
     Header::initialize::<C>(
-        &mut bytes[..],
+        bytes.borrow_mut(),
         slot_count,
         item_count,
         max_load_factor_percent,
