@@ -366,6 +366,11 @@ impl<C: Config, D: Borrow<[u8]>> HashTable<C, D> {
     }
 
     #[inline]
+    pub fn raw_bytes(&self) -> &[u8] {
+        self.allocation.raw_bytes()
+    }
+
+    #[inline]
     pub fn get(&self, key: &C::Key) -> Option<C::Value> {
         let encoded_key = C::encode_key(key);
         self.as_raw().find(&encoded_key).map(C::decode_value)
