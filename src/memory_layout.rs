@@ -116,9 +116,9 @@ impl Header {
         item_count: usize,
         max_load_factor_percent: u8,
     ) {
-        debug_assert_eq!(raw_bytes.len(), bytes_needed::<C>(slot_count));
-        debug_assert!(max_load_factor_percent > 0);
-        debug_assert!(max_load_factor_percent <= 100);
+        assert_eq!(raw_bytes.len(), bytes_needed::<C>(slot_count));
+        assert!(max_load_factor_percent > 0);
+        assert!(max_load_factor_percent <= 100);
 
         debug_assert!(raw_bytes.iter().all(|b| *b == 0));
 
@@ -134,7 +134,7 @@ impl Header {
             padding: [0u8; 7],
         };
 
-        debug_assert_eq!(header.sanity_check::<C>(raw_bytes), Ok(()));
+        assert_eq!(header.sanity_check::<C>(raw_bytes), Ok(()));
 
         unsafe {
             *(raw_bytes.as_mut_ptr() as *mut Header) = header;
@@ -168,6 +168,7 @@ where
             .header()
             .sanity_check::<C>(allocation.bytes.borrow())?;
 
+        // Check that the hash function provides the expected hash values.
         {
             let (entry_metadata, entry_data) = allocation.data_slices();
             RawTable::<C::EncodedKey, C::EncodedValue, C::H>::new(entry_metadata, entry_data)
@@ -188,7 +189,7 @@ where
     #[inline]
     pub fn header(&self) -> &Header {
         let raw_bytes = self.bytes.borrow();
-        debug_assert!(raw_bytes.len() >= HEADER_SIZE);
+        assert!(raw_bytes.len() >= HEADER_SIZE);
 
         let header: &Header = unsafe { &*(raw_bytes.as_ptr() as *const Header) };
 

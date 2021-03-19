@@ -148,14 +148,16 @@ impl<C: Config> Default for HashTableOwned<C> {
 }
 
 impl<C: Config> HashTableOwned<C> {
-    pub fn with_capacity(item_count: usize, max_load_factor_percent: u8) -> HashTableOwned<C> {
+    /// Creates a new [HashTableOwned] that can hold at least `max_item_count`
+    /// items while maintaining the specified load factor.
+    pub fn with_capacity(max_item_count: usize, max_load_factor_percent: u8) -> HashTableOwned<C> {
         assert!(max_load_factor_percent <= 100);
         assert!(max_load_factor_percent > 0);
 
-        let slots_needed = slots_needed(item_count, max_load_factor_percent);
+        let slots_needed = slots_needed(max_item_count, max_load_factor_percent);
         assert!(slots_needed > 0);
 
-        let max_item_count = max_item_count(slots_needed, max_load_factor_percent);
+        let max_item_count = max_item_count_for(slots_needed, max_load_factor_percent);
 
         let allocation = memory_layout::allocate(slots_needed, 0, max_load_factor_percent);
 
@@ -236,6 +238,56 @@ impl<C: Config> HashTableOwned<C> {
         }
     }
 
+    /// Constructs a [HashTableOwned] from its raw byte representation.
+    /// The provided data must have the exact right number of bytes.
+    ///
+    /// This method has linear time complexity as it needs to make its own
+    /// copy of the given data.
+    ///
+    /// The method will verify the header of the given data and return an
+    /// error if the verification fails.
+    pub fn from_raw_bytes(data: &[u8]) -> Result<HashTableOwned<C>, Box<dyn std::error::Error>> {
+        let data = data.to_owned().into_boxed_slice();
+        let allocation = memory_layout::Allocation::from_raw_bytes(data)?;
+
+        let max_item_count = max_item_count_for(
+            allocation.header().slot_count(),
+            allocation.header().max_load_factor_percent(),
+        );
+
+        Ok(HashTableOwned {
+            allocation,
+            max_item_count,
+        })
+    }
+
+    #[inline]
+    pub unsafe fn from_raw_bytes_unchecked(data: &[u8]) -> HashTableOwned<C> {
+        let data = data.to_owned().into_boxed_slice();
+        let allocation = memory_layout::Allocation::from_raw_bytes_unchecked(data);
+
+        let max_item_count = max_item_count_for(
+            allocation.header().slot_count(),
+            allocation.header().max_load_factor_percent(),
+        );
+
+        HashTableOwned {
+            allocation,
+            max_item_count,
+        }
+    }
+
+    /// Returns the number of items stored in the hash table.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.allocation.header().item_count()
+    }
+
+    #[inline]
+    pub fn raw_bytes(&self) -> &[u8] {
+        self.allocation.raw_bytes()
+    }
+
     #[inline]
     fn as_raw(&self) -> RawTable<'_, C::EncodedKey, C::EncodedValue, C::H> {
         let (entry_metadata, entry_data) = self.allocation.data_slices();
@@ -282,47 +334,6 @@ impl<C: Config> HashTableOwned<C> {
             initial_max_load_factor_percent
         );
     }
-
-    #[inline]
-    pub fn raw_bytes(&self) -> &[u8] {
-        self.allocation.raw_bytes()
-    }
-
-    pub fn from_raw_bytes(data: &[u8]) -> Result<HashTableOwned<C>, Box<dyn std::error::Error>> {
-        let data = data.to_owned().into_boxed_slice();
-        let allocation = memory_layout::Allocation::from_raw_bytes(data)?;
-
-        let max_item_count = max_item_count(
-            allocation.header().slot_count(),
-            allocation.header().max_load_factor_percent(),
-        );
-
-        Ok(HashTableOwned {
-            allocation,
-            max_item_count,
-        })
-    }
-
-    #[inline]
-    pub unsafe fn from_raw_bytes_unchecked(data: &[u8]) -> HashTableOwned<C> {
-        let data = data.to_owned().into_boxed_slice();
-        let allocation = memory_layout::Allocation::from_raw_bytes_unchecked(data);
-
-        let max_item_count = max_item_count(
-            allocation.header().slot_count(),
-            allocation.header().max_load_factor_percent(),
-        );
-
-        HashTableOwned {
-            allocation,
-            max_item_count,
-        }
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.allocation.header().item_count()
-    }
 }
 
 impl<C: Config> std::fmt::Debug for HashTableOwned<C> {
@@ -347,12 +358,24 @@ pub struct HashTable<C: Config, D: Borrow<[u8]>> {
 }
 
 impl<C: Config, D: Borrow<[u8]>> HashTable<C, D> {
+
+    /// Constructs a [HashTable] from its raw byte representation.
+    /// The provided data must have the exact right number of bytes.
+    ///
+    /// This method has constant time complexity and will only verify the header
+    /// data of the hash table. It will not copy any data.
     pub fn from_raw_bytes(data: D) -> Result<HashTable<C, D>, Box<dyn std::error::Error>> {
         let allocation = memory_layout::Allocation::from_raw_bytes(data)?;
 
         Ok(HashTable { allocation })
     }
 
+    /// Constructs a [HashTable] from its raw byte representation without doing
+    /// any verification of the underlying data. It is the user's responsibility
+    /// to make sure that the underlying data is actually a valid hash table.
+    ///
+    /// The [HashTable::from_raw_bytes] method provides a safe alternative to this
+    /// method.
     #[inline]
     pub unsafe fn from_raw_bytes_unchecked(data: D) -> HashTable<C, D> {
         HashTable {
@@ -360,6 +383,19 @@ impl<C: Config, D: Borrow<[u8]>> HashTable<C, D> {
         }
     }
 
+    #[inline]
+    pub fn get(&self, key: &C::Key) -> Option<C::Value> {
+        let encoded_key = C::encode_key(key);
+        self.as_raw().find(&encoded_key).map(C::decode_value)
+    }
+
+    #[inline]
+    pub fn iter(&self) -> Iter<'_, C> {
+        let (entry_metadata, entry_data) = self.allocation.data_slices();
+        Iter(RawIter::new(entry_metadata, entry_data))
+    }
+
+    /// Returns the number of items stored in the hash table.
     #[inline]
     pub fn len(&self) -> usize {
         self.allocation.header().item_count()
@@ -371,21 +407,9 @@ impl<C: Config, D: Borrow<[u8]>> HashTable<C, D> {
     }
 
     #[inline]
-    pub fn get(&self, key: &C::Key) -> Option<C::Value> {
-        let encoded_key = C::encode_key(key);
-        self.as_raw().find(&encoded_key).map(C::decode_value)
-    }
-
-    #[inline]
     fn as_raw(&self) -> RawTable<'_, C::EncodedKey, C::EncodedValue, C::H> {
         let (entry_metadata, entry_data) = self.allocation.data_slices();
         RawTable::new(entry_metadata, entry_data)
-    }
-
-    #[inline]
-    pub fn iter(&self) -> Iter<'_, C> {
-        let (entry_metadata, entry_data) = self.allocation.data_slices();
-        Iter(RawIter::new(entry_metadata, entry_data))
     }
 }
 
@@ -428,7 +452,7 @@ impl<C: Config, D: Borrow<[u8]> + BorrowMut<[u8]>> HashTable<C, D> {
         // FIXME: This is actually a bit to conservative because it does not account for
         //        cases where an entry is overwritten and thus the item count does not
         //        change.
-        assert!(item_count < max_item_count(slot_count, max_load_factor_percent));
+        assert!(item_count < max_item_count_for(slot_count, max_load_factor_percent));
 
         let encoded_key = C::encode_key(key);
         let encoded_value = C::encode_value(value);
@@ -474,7 +498,7 @@ fn slots_needed(item_count: usize, max_load_factor_percent: u8) -> usize {
     slots_needed.checked_next_power_of_two().unwrap()
 }
 
-fn max_item_count(slot_count: usize, max_load_factor_percent: u8) -> usize {
+fn max_item_count_for(slot_count: usize, max_load_factor_percent: u8) -> usize {
     let max_load_factor_percent = max_load_factor_percent as usize;
     // Note: we round down here
     (max_load_factor_percent * slot_count) / 100
@@ -616,10 +640,10 @@ mod tests {
         assert_eq!(slots_needed(5, 49), 16);
         assert_eq!(slots_needed(1000, 100), 1024);
 
-        assert_eq!(max_item_count(1, 100), 1);
-        assert_eq!(max_item_count(10, 50), 5);
-        assert_eq!(max_item_count(11, 50), 5);
-        assert_eq!(max_item_count(12, 50), 6);
+        assert_eq!(max_item_count_for(1, 100), 1);
+        assert_eq!(max_item_count_for(10, 50), 5);
+        assert_eq!(max_item_count_for(11, 50), 5);
+        assert_eq!(max_item_count_for(12, 50), 6);
     }
 
     #[test]
