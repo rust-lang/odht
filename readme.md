@@ -1,3 +1,5 @@
+![CI Status](https://github.com/michaelwoerister/odht/actions/workflows/ci.yml/badge.svg)
+
 # odht
 
 A Rust crate for hash tables that can be mapped from disk into memory without the need for up-front decoding.
