@@ -358,7 +358,6 @@ pub struct HashTable<C: Config, D: Borrow<[u8]>> {
 }
 
 impl<C: Config, D: Borrow<[u8]>> HashTable<C, D> {
-
     /// Constructs a [HashTable] from its raw byte representation.
     /// The provided data must have the exact right number of bytes.
     ///
@@ -584,7 +583,8 @@ mod tests {
             let byte_count = bytes_needed::<TestConfig>(items.len(), 87);
             let data = vec![0u8; byte_count];
 
-            let mut table = HashTable::<TestConfig, _>::init_in_place(data, items.len(), 87).unwrap();
+            let mut table =
+                HashTable::<TestConfig, _>::init_in_place(data, items.len(), 87).unwrap();
 
             for (i, (k, v)) in items.iter().enumerate() {
                 assert_eq!(table.len(), i);
