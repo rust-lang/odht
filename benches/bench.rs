@@ -171,53 +171,13 @@ macro_rules! bench {
     ($name:ident, $num_values:expr) => {
         mod $name {
             #[bench]
-            fn lookup_odht_fx_load_50(b: &mut test::Bencher) {
-                crate::bench_odht_fx_lookup(b, $num_values, 50);
+            fn lookup_odht_fx_load_87(b: &mut test::Bencher) {
+                crate::bench_odht_fx_lookup(b, $num_values, 87);
             }
 
             #[bench]
-            fn lookup_odht_fx_load_70(b: &mut test::Bencher) {
-                crate::bench_odht_fx_lookup(b, $num_values, 70);
-            }
-
-            #[bench]
-            fn lookup_odht_fx_load_80(b: &mut test::Bencher) {
-                crate::bench_odht_fx_lookup(b, $num_values, 80);
-            }
-
-            #[bench]
-            fn lookup_odht_fx_load_90(b: &mut test::Bencher) {
-                crate::bench_odht_fx_lookup(b, $num_values, 90);
-            }
-
-            #[bench]
-            fn lookup_odht_fx_load_95(b: &mut test::Bencher) {
-                crate::bench_odht_fx_lookup(b, $num_values, 95);
-            }
-
-            #[bench]
-            fn insert_odht_fx_load_50(b: &mut test::Bencher) {
-                crate::bench_odht_fx_insert(b, $num_values, 50);
-            }
-
-            #[bench]
-            fn insert_odht_fx_load_70(b: &mut test::Bencher) {
-                crate::bench_odht_fx_insert(b, $num_values, 70);
-            }
-
-            #[bench]
-            fn insert_odht_fx_load_80(b: &mut test::Bencher) {
-                crate::bench_odht_fx_insert(b, $num_values, 80);
-            }
-
-            #[bench]
-            fn insert_odht_fx_load_90(b: &mut test::Bencher) {
-                crate::bench_odht_fx_insert(b, $num_values, 90);
-            }
-
-            #[bench]
-            fn insert_odht_fx_load_95(b: &mut test::Bencher) {
-                crate::bench_odht_fx_insert(b, $num_values, 95);
+            fn insert_odht_fx_load_87(b: &mut test::Bencher) {
+                crate::bench_odht_fx_insert(b, $num_values, 87);
             }
 
             #[bench]
@@ -233,7 +193,11 @@ macro_rules! bench {
     };
 }
 
-bench!(____n10, 10);
-bench!(____n50, 50);
-bench!(___n500, 500);
-bench!(__n5000, 5000);
+// These numbers are chosen so that we get an actual load factor of ~87%
+// taking into account that slot counts are always rounded up to the next
+// power of two.
+bench!(____n13, 13);
+bench!(____n55, 55);
+bench!(___n444, 444);
+bench!(__n3550, 3550);
+bench!(_n57000, 57000);
