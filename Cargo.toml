@@ -7,9 +7,13 @@ license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[dependencies]
+cfg-if = "1.0.0"
+
 [dev-dependencies]
 rand = "0.8.2"
 rustc-hash = "1.1.0"
 
 [features]
 nightly = []
+no_simd = []

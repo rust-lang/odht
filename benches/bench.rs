@@ -50,6 +50,22 @@ fn index_contained(i: usize) -> bool {
     i % 10 != 3
 }
 
+// Call functions being benchmark through an #[inline(never)] wrapper
+// so that we get a clear inlining barrier to look at in profilers.
+#[inline(never)]
+fn get_value<F: Fn(&TestKey) -> Option<u32>>(f: &F, key: &TestKey) -> Option<u32> {
+    f(key)
+}
+
+#[inline(never)]
+fn insert_value<F: FnMut(TestKey, u32) -> Option<u32>>(
+    f: &mut F,
+    key: TestKey,
+    value: u32,
+) -> Option<u32> {
+    f(key, value)
+}
+
 fn generate_hash_table(
     test_data: &[(TestKey, u32)],
     load_factor_percent: u8,
@@ -110,13 +126,15 @@ fn bench_odht_fx_lookup(b: &mut test::Bencher, num_values: usize, load_factor_pe
 
     let table = HashTable::<FxConfig, _>::from_raw_bytes(&serialized[1..]).unwrap();
 
+    let get = |key: &TestKey| table.get(key);
+
     b.iter(|| {
         for _ in 0..LOOKUP_ITERATIONS {
             for (index, &(key, value)) in test_data.iter().enumerate() {
                 if index_contained(index) {
-                    assert!(table.get(&key) == Some(value));
+                    assert!(get_value(&get, &key) == Some(value));
                 } else {
-                    assert!(table.get(&key).is_none());
+                    assert!(get_value(&get, &key).is_none());
                 }
             }
         }
@@ -129,8 +147,11 @@ fn bench_odht_fx_insert(b: &mut test::Bencher, num_values: usize, load_factor_pe
     b.iter(|| {
         for _ in 0..INSERT_ITERATIONS {
             let mut table = HashTableOwned::<FxConfig>::with_capacity(10, load_factor_percent);
+
+            let mut insert = |key: TestKey, value: u32| table.insert(&key, &value);
+
             for (key, value) in test_data.iter() {
-                assert!(table.insert(key, value) == None);
+                assert!(insert_value(&mut insert, *key, *value).is_none());
             }
         }
     })
@@ -140,13 +161,15 @@ fn bench_std_fx_lookup(b: &mut test::Bencher, num_values: usize) {
     let test_data = crate::generate_test_data(num_values);
     let table = crate::generate_std_hash_table(&test_data);
 
+    let get = |key: &TestKey| table.get(key).cloned();
+
     b.iter(|| {
         for _ in 0..LOOKUP_ITERATIONS {
-            for (index, (key, value)) in test_data.iter().enumerate() {
+            for (index, &(key, value)) in test_data.iter().enumerate() {
                 if index_contained(index) {
-                    assert!(table.get(key) == Some(value));
+                    assert!(get_value(&get, &key) == Some(value));
                 } else {
-                    assert!(table.get(key).is_none());
+                    assert!(get_value(&get, &key).is_none());
                 }
             }
         }
@@ -160,8 +183,10 @@ fn bench_std_fx_insert(b: &mut test::Bencher, num_values: usize) {
         for _ in 0..INSERT_ITERATIONS {
             let mut table = FxHashMap::default();
 
-            for &(key, value) in test_data.iter() {
-                assert!(table.insert(key, value) == None);
+            let mut insert = |key: TestKey, value: u32| -> Option<u32> { table.insert(key, value) };
+
+            for (key, value) in test_data.iter() {
+                assert!(insert_value(&mut insert, *key, *value).is_none());
             }
         }
     })

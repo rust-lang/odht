@@ -9,19 +9,11 @@
 //! Many functions in this module are marked as `#[inline]`. This is allows
 //! LLVM to retain the information about byte array sizes, even though they are
 //! converted to slices (of unknown size) from time to time.
-//!
-//! The implementation uses robin hood hashing with linear probing and is based
-//! mostly on [Robin Hood Hashing should be your default Hash Table
-//! implementation][rhh] by Sebastian Sylvan.
-//!
-//! [rhh]: https://www.sebastiansylvan.com/post/robin-hood-hashing-should-be-your-default-hash-table-implementation/
 
+use crate::swisstable_group_query::{GroupQuery, GROUP_SIZE};
 use crate::{error::Error, HashFn};
-use std::{
-    fmt,
-    marker::PhantomData,
-    mem::{align_of, size_of},
-};
+use std::convert::TryInto;
+use std::{fmt, marker::PhantomData, mem::size_of};
 
 /// Values of this type represent key-value pairs *as they are stored on-disk*.
 /// `#[repr(C)]` makes sure we have deterministic field order and the fields
@@ -47,111 +39,63 @@ impl<K: ByteArray, V: ByteArray> Entry<K, V> {
 
 impl<'a, K: ByteArray, V: ByteArray, H: HashFn> fmt::Debug for RawTable<'a, K, V, H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut probe_distances = Vec::new();
-        let mod_mask = self.data.len() - 1;
-
-        for (i, (metadata, entry)) in self.metadata.iter().zip(self.data.iter()).enumerate() {
-            if metadata.is_empty() {
-                writeln!(f, "{:>2} -", i)?;
-            } else {
-                let probe_distance = probe_distance(metadata.hash(), i, mod_mask);
-                probe_distances.push(probe_distance);
-
-                writeln!(
-                    f,
-                    "{:>2} - desired={:>2}, dist={:>2}, key: {:?}, val: {:?}",
-                    i,
-                    desired_index(metadata.hash(), mod_mask),
-                    probe_distance,
-                    entry.key,
-                    entry.value
-                )?;
-            }
-        }
-
-        if probe_distances.is_empty() {
-            return writeln!(f, "");
-        }
-
-        let max_probe_distance = probe_distances.iter().cloned().max().unwrap();
-        let average_probe_distance =
-            probe_distances.iter().cloned().sum::<usize>() as f32 / probe_distances.len() as f32;
-
-        let mut probe_distance_histogram = vec![0; max_probe_distance + 1];
-
-        for probe_distance in probe_distances {
-            probe_distance_histogram[probe_distance] += 1;
-        }
-
-        writeln!(f, "\nstats:")?;
-        writeln!(f, "  - average probe distance = {}", average_probe_distance)?;
-        writeln!(f, "  - max probe distance = {}", max_probe_distance)?;
-        writeln!(
-            f,
-            "  - probe distance histogram = {:?}",
-            probe_distance_histogram
-        )
+        write!(f, "<debug no implemented>")
     }
 }
 
-/// `EntryMetadata` stores the hash value of a given entry. A value of zero
-/// denotes an empty entry. The `make_hash` function below makes sure that
-/// all actual hash values are non-zero.
-#[repr(C)]
-#[derive(PartialEq, Eq, Default, Clone, Copy, Debug)]
-pub(crate) struct EntryMetadata {
-    hash: [u8; 4],
+pub(crate) type EntryMetadata = u8;
+
+type HashValue = u32;
+
+#[inline]
+fn h1(h: HashValue) -> usize {
+    h as usize
 }
 
-impl EntryMetadata {
-    #[inline]
-    fn occupied(hash: u32) -> EntryMetadata {
-        assert!(align_of::<EntryMetadata>() == 1);
+#[inline]
+fn h2(h: HashValue) -> u8 {
+    const SHIFT: usize = size_of::<HashValue>() * 8 - 7;
+    (h >> SHIFT) as u8
+}
 
-        // We expect the hash value of occupied entries to be non-zero.
-        debug_assert!(hash != 0);
-        EntryMetadata {
-            hash: hash.to_le_bytes(),
+struct PropeSeq {
+    index: usize,
+    stride: usize,
+}
+
+impl PropeSeq {
+    #[inline]
+    fn new(h1: usize, mask: usize) -> PropeSeq {
+        PropeSeq {
+            index: h1 & mask,
+            stride: 0,
         }
     }
 
     #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.hash == [0, 0, 0, 0]
-    }
-
-    #[inline]
-    fn hash(&self) -> u32 {
-        debug_assert!(!self.is_empty());
-        u32::from_le_bytes(self.hash)
+    fn advance(&mut self, mask: usize) {
+        self.stride += GROUP_SIZE;
+        self.index += self.stride;
+        self.index &= mask;
     }
 }
 
-/// Computes the hash value of the given key, making sure that the result is
-/// always non-zero.
 #[inline]
-fn make_hash<K: ByteArray, H: HashFn>(key: &K) -> u32 {
-    let hash = H::hash(key.as_slice());
-    hash | (1 << 31)
+fn group_starting_at<'a>(control_bytes: &'a [u8], index: usize) -> &'a [u8; GROUP_SIZE] {
+    debug_assert!(index < control_bytes.len() - GROUP_SIZE);
+    unsafe {
+        std::slice::from_raw_parts(control_bytes.as_ptr().offset(index as isize), GROUP_SIZE)
+            .try_into()
+            .unwrap()
+    }
 }
 
-/// Computes the index a key with the given hash should ideally, i.e. if
-/// that slot was not occupied by another entry.
 #[inline]
-fn desired_index(hash: u32, mod_mask: usize) -> usize {
-    (hash as usize) & mod_mask
+fn is_empty_or_deleted(control_byte: u8) -> bool {
+    (control_byte & EMPTY_CONTROL_BYTE) != 0
 }
 
-/// Computes how far a key with the given hash is away from its desired
-/// index. The formula works even if probing wrapped around the end of
-/// the table.
-/// From https://gist.github.com/ssylvan/5538011
-#[inline]
-fn probe_distance(hash: u32, slot_index: usize, mod_mask: usize) -> usize {
-    let slot_count = mod_mask + 1;
-    debug_assert!(slot_count.is_power_of_two());
-    (slot_index + slot_count - desired_index(hash, mod_mask)) & mod_mask
-}
+const EMPTY_CONTROL_BYTE: u8 = 0b1000_0000;
 
 /// This type provides a readonly view of the given table data.
 #[derive(PartialEq, Eq)]
@@ -179,8 +123,8 @@ where
         assert!(size_of::<Entry<K, V>>() == size_of::<K>() + size_of::<V>());
         assert!(std::mem::align_of::<Entry<K, V>>() == 1);
 
-        debug_assert!(metadata.len().is_power_of_two());
-        debug_assert_eq!(data.len(), metadata.len());
+        debug_assert!(data.len().is_power_of_two());
+        debug_assert!(metadata.len() == data.len() + GROUP_SIZE);
 
         Self {
             metadata,
@@ -191,32 +135,32 @@ where
 
     #[inline]
     pub(crate) fn find(&self, key: &K) -> Option<&V> {
-        let search_hash = make_hash::<K, H>(key);
-        let mod_mask = self.data.len() - 1;
-        let mut i = desired_index(search_hash, mod_mask);
-        let mut search_probe_distance = 0;
+        debug_assert!(self.data.len().is_power_of_two());
+        debug_assert!(self.metadata.len() == self.data.len() + GROUP_SIZE);
+
+        let mask = self.data.len() - 1;
+        let hash = H::hash(key.as_slice());
+        let mut ps = PropeSeq::new(h1(hash), mask);
+        let h2 = h2(hash);
 
         loop {
-            let h = self.metadata[i];
+            let mut group_query = GroupQuery::from(group_starting_at(self.metadata, ps.index), h2);
 
-            if h.is_empty() {
-                return None;
-            }
+            for m in &mut group_query {
+                let index = (ps.index + m) & mask;
 
-            if h.hash() == search_hash {
-                let entry = &self.data[i];
+                let entry = self.entry_at(index);
 
-                if likely!(key.equals(&entry.key)) {
+                if likely!(entry.key.equals(key)) {
                     return Some(&entry.value);
                 }
             }
 
-            if search_probe_distance > probe_distance(h.hash(), i, mod_mask) {
+            if likely!(group_query.any_empty()) {
                 return None;
             }
 
-            search_probe_distance += 1;
-            i = (i + 1) & mod_mask;
+            ps.advance(mask);
         }
     }
 
@@ -231,35 +175,45 @@ where
     /// A mismatch is an indication that the table has been deserialized with
     /// the wrong hash function.
     pub(crate) fn sanity_check_hashes(&self, slots_to_check: usize) -> Result<(), Error> {
-        let mut i = 0;
-        let slots_to_check = std::cmp::min(slots_to_check, self.metadata.len());
+        let slots_to_check = std::cmp::min(slots_to_check, self.data.len());
 
-        while i < slots_to_check {
-            let hash = self.metadata[i];
+        for i in 0..slots_to_check {
+            let metadata = self.metadata[i];
+            let entry = &self.data[i];
 
-            if !hash.is_empty() {
-                let expected_hash = hash.hash();
-                let actual_hash = make_hash::<K, H>(&self.data[i].key);
+            if is_empty_or_deleted(metadata) {
+                if !entry.key.is_all_zeros() || !entry.value.is_all_zeros() {
+                    let message = format!("Found empty entry with non-zero contents at {}", i);
 
-                if actual_hash != expected_hash {
+                    return Err(Error(message));
+                }
+            } else {
+                let hash = H::hash(entry.key.as_slice());
+                let h2 = h2(hash);
+
+                if metadata != h2 {
                     let message = format!(
-                        "Hash mismatch for entry {}. Expected {}, found {}.",
-                        i, expected_hash, actual_hash
+                        "Control byte does not match hash value for entry {}. Expected {}, found {}.",
+                        i, h2, metadata
                     );
 
                     return Err(Error(message));
                 }
             }
-
-            i += 1;
         }
 
         Ok(())
     }
+
+    #[inline]
+    fn entry_at(&self, index: usize) -> &Entry<K, V> {
+        debug_assert!(index < self.data.len());
+        unsafe { self.data.get_unchecked(index) }
+    }
 }
 
 /// This type provides a mutable view of the given table data. It allows for
-/// inserting new entries but does not allow for growing the table.
+/// inserting new entries but does *not* allow for growing the table.
 #[derive(PartialEq, Eq)]
 pub(crate) struct RawTableMut<'a, K, V, H>
 where
@@ -285,8 +239,8 @@ where
         assert!(size_of::<Entry<K, V>>() == size_of::<K>() + size_of::<V>());
         assert!(std::mem::align_of::<Entry<K, V>>() == 1);
 
-        debug_assert!(metadata.len().is_power_of_two());
-        debug_assert_eq!(data.len(), metadata.len());
+        debug_assert!(data.len().is_power_of_two());
+        debug_assert_eq!(metadata.len(), data.len() + GROUP_SIZE);
 
         Self {
             metadata,
@@ -301,65 +255,65 @@ where
     ///          somewhere. If there isn't it will end up in an infinite loop.
     #[inline]
     pub(crate) fn insert(&mut self, key: K, value: V) -> Option<V> {
-        let new_entry = Entry::new(key, value);
-        let new_entry_metadata = EntryMetadata::occupied(make_hash::<K, H>(&key));
-        self.insert_entry(new_entry_metadata, new_entry)
-    }
+        assert!(self.data.len().is_power_of_two());
+        debug_assert!(self.metadata.len() == self.data.len() + GROUP_SIZE);
 
-    /// Inserts the given key value pair into the hash table.
-    ///
-    /// WARNING: This method assumes that there is free space in the hash table
-    ///          somewhere. If there isn't it will end up in an infinite loop.
-    #[inline]
-    pub(crate) fn insert_entry(
-        &mut self,
-        mut new_entry_metadata: EntryMetadata,
-        mut new_entry: Entry<K, V>,
-    ) -> Option<V> {
-        debug_assert!(!new_entry_metadata.is_empty());
-        let mod_mask = self.data.len() - 1;
-        let mut i = desired_index(new_entry_metadata.hash(), mod_mask);
-        let mut this_probe_distance = 0;
+        let mask = self.data.len() - 1;
+        let hash = H::hash(key.as_slice());
 
-        #[cfg(debug_assertions)]
-        let initial_index = i;
+        let mut ps = PropeSeq::new(h1(hash), mask);
+        let h2 = h2(hash);
 
         loop {
-            let hash_slot = &mut self.metadata[i];
+            let mut group_query = GroupQuery::from(group_starting_at(self.metadata, ps.index), h2);
 
-            if hash_slot.is_empty() {
-                *hash_slot = new_entry_metadata;
-                self.data[i] = new_entry;
-                debug_assert!(!hash_slot.is_empty());
-                return None;
-            } else if hash_slot.hash() == new_entry_metadata.hash() {
-                let entry_slot = &mut self.data[i];
+            for m in &mut group_query {
+                let index = (ps.index + m) & mask;
 
-                if likely!(entry_slot.key.equals(&new_entry.key)) {
-                    debug_assert!(hash_slot.hash() == new_entry_metadata.hash());
-                    let old_value = entry_slot.value;
-                    entry_slot.value = new_entry.value;
-                    return Some(old_value);
+                let entry = entry_at_mut(self.data, index);
+
+                if likely!(entry.key.equals(&key)) {
+                    let ret = Some(entry.value);
+                    entry.value = value;
+                    return ret;
                 }
             }
 
-            let other_probe_distance = probe_distance(hash_slot.hash(), i, mod_mask);
+            if let Some(first_empty) = group_query.first_empty() {
+                let index = (ps.index + first_empty) & mask;
+                *entry_at_mut(self.data, index) = Entry::new(key, value);
+                *metadata_at_mut(self.metadata, index) = h2;
 
-            if this_probe_distance > other_probe_distance {
-                std::mem::swap(&mut self.data[i], &mut new_entry);
-                std::mem::swap(hash_slot, &mut new_entry_metadata);
-                this_probe_distance = other_probe_distance;
+                if index < GROUP_SIZE {
+                    let first_mirror = self.data.len();
+                    *metadata_at_mut(self.metadata, first_mirror + index) = h2;
+                    debug_assert_eq!(
+                        self.metadata[..GROUP_SIZE],
+                        self.metadata[self.data.len()..]
+                    );
+                }
+
+                return None;
             }
 
-            this_probe_distance += 1;
-            i = (i + 1) & mod_mask;
-
-            #[cfg(debug_assertions)]
-            {
-                assert!(i != initial_index);
-            }
+            ps.advance(mask);
         }
     }
+}
+
+#[inline]
+fn entry_at_mut<K: ByteArray, V: ByteArray>(
+    data: &mut [Entry<K, V>],
+    index: usize,
+) -> &mut Entry<K, V> {
+    debug_assert!(index < data.len());
+    unsafe { data.get_unchecked_mut(index) }
+}
+
+#[inline]
+fn metadata_at_mut(metadata: &mut [EntryMetadata], index: usize) -> &mut EntryMetadata {
+    debug_assert!(index < metadata.len());
+    unsafe { metadata.get_unchecked_mut(index) }
 }
 
 impl<'a, K: ByteArray, V: ByteArray, H: HashFn> fmt::Debug for RawTableMut<'a, K, V, H> {
@@ -385,8 +339,9 @@ where
     V: ByteArray,
 {
     pub(crate) fn new(metadata: &'a [EntryMetadata], data: &'a [Entry<K, V>]) -> RawIter<'a, K, V> {
-        debug_assert!(metadata.len() == data.len());
-        debug_assert!(metadata.len().is_power_of_two());
+        debug_assert!(data.len().is_power_of_two());
+        debug_assert!(metadata.len() == data.len() + 16);
+
         RawIter {
             metadata,
             data,
@@ -413,7 +368,7 @@ where
             self.current_index += 1;
 
             let entry_metadata = self.metadata[index];
-            if !entry_metadata.is_empty() {
+            if !is_empty_or_deleted(entry_metadata) {
                 return Some((entry_metadata, &self.data[index]));
             }
         }
@@ -427,6 +382,9 @@ pub trait ByteArray:
 {
     fn as_slice(&self) -> &[u8];
     fn equals(&self, other: &Self) -> bool;
+    fn is_all_zeros(&self) -> bool {
+        self.as_slice().iter().all(|b| *b == 0)
+    }
 }
 
 macro_rules! impl_byte_array {
@@ -442,27 +400,47 @@ macro_rules! impl_byte_array {
             // 16+ byte keys)
             #[inline]
             fn equals(&self, other: &Self) -> bool {
+                use std::mem::size_of;
                 // Most branches here are optimized away at compile time
                 // because they depend on values known at compile time.
 
-                let u64s = std::mem::size_of::<Self>() / 8;
+                const USIZE: usize = size_of::<usize>();
 
-                for i in 0..u64s {
-                    let offset = i * 8;
-                    let left = read_u64(&self[offset..offset + 8]);
-                    let right = read_u64(&other[offset..offset + 8]);
-
-                    if left != right {
-                        return false;
-                    }
+                // Special case a few cases we care about
+                if size_of::<Self>() == USIZE {
+                    return read_usize(&self[..], 0) == read_usize(&other[..], 0);
                 }
 
-                return &self[u64s * 8..] == &other[u64s * 8..];
+                if size_of::<Self>() == USIZE * 2 {
+                    return read_usize(&self[..], 0) == read_usize(&other[..], 0)
+                        && read_usize(&self[..], 1) == read_usize(&other[..], 1);
+                }
 
-                #[inline]
-                fn read_u64(bytes: &[u8]) -> u64 {
+                if size_of::<Self>() == USIZE * 3 {
+                    return read_usize(&self[..], 0) == read_usize(&other[..], 0)
+                        && read_usize(&self[..], 1) == read_usize(&other[..], 1)
+                        && read_usize(&self[..], 2) == read_usize(&other[..], 2);
+                }
+
+                if size_of::<Self>() == USIZE * 4 {
+                    return read_usize(&self[..], 0) == read_usize(&other[..], 0)
+                        && read_usize(&self[..], 1) == read_usize(&other[..], 1)
+                        && read_usize(&self[..], 2) == read_usize(&other[..], 2)
+                        && read_usize(&self[..], 3) == read_usize(&other[..], 3);
+                }
+
+                // fallback
+                return &self[..] == &other[..];
+
+                #[inline(always)]
+                fn read_usize(bytes: &[u8], index: usize) -> usize {
                     use std::convert::TryInto;
-                    u64::from_le_bytes(bytes[..8].try_into().unwrap())
+                    const STRIDE: usize = size_of::<usize>();
+                    usize::from_le_bytes(
+                        bytes[STRIDE * index..STRIDE * (index + 1)]
+                            .try_into()
+                            .unwrap(),
+                    )
                 }
             }
         }
@@ -519,9 +497,9 @@ mod tests {
     ) -> (Vec<EntryMetadata>, Vec<Entry<K, V>>) {
         let size = xs.size_hint().0.next_power_of_two();
         let mut data = vec![Entry::default(); size];
-        let mut metadata = vec![EntryMetadata::default(); size];
+        let mut metadata = vec![255; size + 16];
 
-        assert!(metadata.iter().all(EntryMetadata::is_empty));
+        assert!(metadata.iter().all(|b| is_empty_or_deleted(*b)));
 
         {
             let mut table: RawTableMut<K, V, H> = RawTableMut {
@@ -538,226 +516,48 @@ mod tests {
         (metadata, data)
     }
 
-    // A hash function that extracts the first byte as hash value. This is
-    // useful for handwritten tests because we can directly determine which
-    // index a given key should end up at (i.e. its first byte).
-
-    #[derive(Eq, PartialEq)]
-    struct FirstByteHashFn;
-    impl HashFn for FirstByteHashFn {
-        fn hash(bytes: &[u8]) -> u32 {
-            bytes[0] as u32
-        }
-    }
-
-    macro_rules! mk {
-        ($name:ident, $type:ident, [ $($entry:expr,)* ]) => {
-
-            let mut metadata = Vec::new();
-            let mut data = Vec::new();
-
-            $({
-                let entry = $entry;
-
-                metadata.push(entry.0);
-                data.push(entry.1);
-            })*
-
-            let metadata = mk!($type, metadata);
-            let data = mk!($type, data);
-
-            #[allow(unused_mut)]
-            let mut $name = $type {
-                metadata,
-                data,
-                _hash_fn: PhantomData::<FirstByteHashFn>::default(),
-            };
-        };
-
-        (RawTable, $x:expr) => { &$x };
-        (RawTableMut, $x:expr) => { &mut $x };
-    }
-
-    fn entry<K: ByteArray, V: ByteArray>(hash: u32, key: K, value: V) -> (EntryMetadata, Entry<K, V>) {
-        (EntryMetadata::occupied(hash | (1 << 31)), Entry::new(key, value))
-    }
-
-    fn empty_entry<K: ByteArray, V: ByteArray>() -> (EntryMetadata, Entry<K, V>) {
-        (EntryMetadata::default(), Entry::default())
-    }
-
-    #[test]
-    fn lookup_entry_in_desired_slot() {
-        mk!(table, RawTable, [
-            empty_entry(),
-            entry(1, [1, 1], [1]),
-            entry(2, [2, 1], [2]),
-            empty_entry(),
-        ]);
-
-        assert_eq!(table.find(&[0, 0]), None);
-        assert_eq!(table.find(&[1, 1]), Some(&[1]));
-        assert_eq!(table.find(&[2, 1]), Some(&[2]));
-        assert_eq!(table.find(&[3, 1]), None);
-    }
-
-    #[test]
-    fn lookup_entry_that_needs_probing() {
-        // The keys [1, 1], [1, 2], and [1, 3] all want the same slot in the
-        // table. To reach the latter we have to do linear probing.
-        mk!(table, RawTable, [
-            empty_entry(),
-            entry(1, [1, 1], [1]),
-            entry(1, [1, 2], [2]),
-            entry(1, [1, 3], [3]),
-            empty_entry(),
-            empty_entry(),
-            empty_entry(),
-            empty_entry(),
-        ]);
-
-        assert_eq!(table.find(&[1, 1]), Some(&[1]));
-        assert_eq!(table.find(&[1, 2]), Some(&[2]));
-        assert_eq!(table.find(&[1, 3]), Some(&[3]));
-    }
-
-    #[test]
-    fn lookup_entry_that_needs_probing_with_wrapping() {
-        // The keys [2, 1] and [2, 2] both want the same slot in the table.
-        // [2, 2] has been moved one slot further (wrapping around to 0).
-        mk!(table, RawTable, [
-            entry(3, [3, 2], [1]),
-            empty_entry(),
-            empty_entry(),
-            entry(3, [3, 1], [2]),
-        ]);
-
-        assert_eq!(table.find(&[3, 2]), Some(&[1]));
-        assert_eq!(table.find(&[3, 1]), Some(&[2]));
-    }
-
-    #[test]
-    fn insert_entry_at_desired_index() {
-        mk!(table, RawTableMut, [
-            empty_entry(),
-            empty_entry(),
-            empty_entry(),
-            empty_entry(),
-        ]);
-
-        table.insert([1, 0], [1]);
-
-        mk!(expected_table, RawTableMut, [
-            empty_entry(),
-            entry(1, [1, 0], [1]),
-            empty_entry(),
-            empty_entry(),
-        ]);
-
-        assert_eq!(table, expected_table);
-    }
-
-    #[test]
-    fn insert_entry_one_past_desired_index() {
-        mk!(table, RawTableMut, [
-            empty_entry(),
-            entry(1, [1, 0], [1]),
-            empty_entry(),
-            empty_entry(),
-        ]);
-
-        table.insert([1, 1], [2]);
-
-        mk!(expected_table, RawTableMut, [
-            empty_entry(),
-            entry(1, [1, 0], [1]),
-            entry(1, [1, 1], [2]),
-            empty_entry(),
-        ]);
-
-        assert_eq!(table, expected_table);
-    }
-
-    #[test]
-    fn insert_entry_that_pushes_down_other_entry() {
-        mk!(table, RawTableMut, [
-            empty_entry(),
-            entry(1, [1, 0], [1]),
-            entry(2, [2, 1], [2]),
-            empty_entry(),
-        ]);
-
-        assert_eq!(table.insert([1, 1], [3]), None);
-
-        mk!(expected_table, RawTableMut, [
-                empty_entry(),
-                entry(1, [1, 0], [1]),
-                entry(1, [1, 1], [3]),
-                entry(2, [2, 1], [2]),
-            ]
-        );
-
-        assert_eq!(table, expected_table);
-    }
-
-    #[test]
-    fn insert_entry_that_replaces_other_entry() {
-        mk!(table, RawTableMut, [
-            empty_entry(),
-            entry(1, [1, 0], [1]),
-            entry(2, [2, 1], [2]),
-            empty_entry(),
-        ]);
-
-        assert_eq!(table.insert([1, 0], [3]), Some([1]));
-
-        mk!(expected_table, RawTableMut, [
-                empty_entry(),
-                entry(1, [1, 0], [3]),
-                entry(2, [2, 1], [2]),
-                empty_entry(),
-            ]
-        );
-
-        assert_eq!(table, expected_table);
-    }
-
-    #[test]
-    fn insert_entry_that_replaces_other_entry_after_probing() {
-        mk!(table, RawTableMut, [
-            empty_entry(),
-            entry(1, [1, 0], [1]),
-            entry(1, [1, 1], [2]),
-            empty_entry(),
-        ]);
-
-        assert_eq!(table.insert([1, 1], [3]), Some([2]));
-
-        mk!(expected_table, RawTableMut, [
-                empty_entry(),
-                entry(1, [1, 0], [1]),
-                entry(1, [1, 1], [3]),
-                empty_entry(),
-            ]
-        );
-
-        assert_eq!(table, expected_table);
-    }
-
     #[test]
     fn stress() {
         let xs: Vec<[u8; 2]> = (0 ..= u16::MAX).map(|x| x.to_le_bytes()).collect();
 
-        let (metadata, data) = make_table::<_, _, _, FxHashFn>(xs.iter().map(|x| (*x, *x)));
+        let (mut metadata, mut data) = make_table::<_, _, _, FxHashFn>(xs.iter().map(|x| (*x, *x)));
 
-        let table: RawTable<_, _, FxHashFn> = RawTable {
-            metadata: &metadata[..],
-            data: &data[..],
-            _hash_fn: PhantomData::default(),
-        };
+        {
+            let table: RawTable<_, _, FxHashFn> = RawTable {
+                metadata: &metadata[..],
+                data: &data[..],
+                _hash_fn: PhantomData::default(),
+            };
 
-        for x in xs.iter() {
-            assert_eq!(table.find(x), Some(x));
+            for x in xs.iter() {
+                assert_eq!(table.find(x), Some(x));
+            }
+        }
+
+        // overwrite all values
+        {
+            let mut table: RawTableMut<_, _, FxHashFn> = RawTableMut {
+                metadata: &mut metadata[..],
+                data: &mut data[..],
+                _hash_fn: PhantomData::default(),
+            };
+
+            for (i, x) in xs.iter().enumerate() {
+                assert_eq!(table.insert(*x, [i as u8, (i + 1) as u8]), Some(*x));
+            }
+        }
+
+        // Check if we find the new expected values
+        {
+            let table: RawTable<_, _, FxHashFn> = RawTable {
+                metadata: &metadata[..],
+                data: &data[..],
+                _hash_fn: PhantomData::default(),
+            };
+
+            for (i, x) in xs.iter().enumerate() {
+                assert_eq!(table.find(x), Some(&[i as u8, (i + 1) as u8]));
+            }
         }
     }
 }
