@@ -9,6 +9,8 @@ use crate::Config;
 use crate::{
     error::Error,
     raw_table::{Entry, EntryMetadata, RawTable},
+    swisstable_group_query::GROUP_SIZE,
+    Factor,
 };
 
 #[repr(C)]
@@ -23,9 +25,9 @@ pub(crate) struct Header {
     item_count: [u8; 8],
     slot_count: [u8; 8],
 
-    max_load_factor_percent: u8,
+    max_load_factor: [u8; 2],
     // Let's keep things at least 8 byte aligned
-    padding: [u8; 7],
+    padding: [u8; 6],
 }
 
 const HEADER_TAG: [u8; 4] = *b"ODHT";
@@ -94,8 +96,8 @@ impl Header {
     }
 
     #[inline]
-    pub fn max_load_factor_percent(&self) -> u8 {
-        self.max_load_factor_percent
+    pub fn max_load_factor(&self) -> Factor {
+        Factor(u16::from_le_bytes(self.max_load_factor))
     }
 
     #[inline]
@@ -114,13 +116,9 @@ impl Header {
         raw_bytes: &mut [u8],
         slot_count: usize,
         item_count: usize,
-        max_load_factor_percent: u8,
+        max_load_factor: Factor,
     ) {
         assert_eq!(raw_bytes.len(), bytes_needed::<C>(slot_count));
-        assert!(max_load_factor_percent > 0);
-        assert!(max_load_factor_percent <= 100);
-
-        debug_assert!(raw_bytes.iter().all(|b| *b == 0));
 
         let header = Header {
             tag: HEADER_TAG,
@@ -130,8 +128,8 @@ impl Header {
             size_of_header: size_of::<Header>().try_into().unwrap(),
             item_count: (item_count as u64).to_le_bytes(),
             slot_count: (slot_count as u64).to_le_bytes(),
-            max_load_factor_percent,
-            padding: [0u8; 7],
+            max_load_factor: max_load_factor.0.to_le_bytes(),
+            padding: [0u8; 6],
         };
 
         assert_eq!(header.sanity_check::<C>(raw_bytes), Ok(()));
@@ -172,7 +170,7 @@ where
         {
             let (entry_metadata, entry_data) = allocation.data_slices();
             RawTable::<C::EncodedKey, C::EncodedValue, C::H>::new(entry_metadata, entry_data)
-                .sanity_check_hashes(3)?;
+                .sanity_check_hashes(10)?;
         }
 
         Ok(allocation)
@@ -189,7 +187,7 @@ where
     #[inline]
     pub fn header(&self) -> &Header {
         let raw_bytes = self.bytes.borrow();
-        assert!(raw_bytes.len() >= HEADER_SIZE);
+        debug_assert!(raw_bytes.len() >= HEADER_SIZE);
 
         let header: &Header = unsafe { &*(raw_bytes.as_ptr() as *const Header) };
 
@@ -208,7 +206,7 @@ where
         let entry_metadata = unsafe {
             std::slice::from_raw_parts(
                 raw_bytes.as_ptr().offset(metadata_offset) as *const EntryMetadata,
-                slot_count,
+                slot_count + GROUP_SIZE,
             )
         };
 
@@ -276,7 +274,7 @@ where
         let entry_metadata = unsafe {
             std::slice::from_raw_parts_mut(
                 raw_bytes.as_mut_ptr().offset(metadata_offset) as *mut EntryMetadata,
-                slot_count,
+                slot_count + GROUP_SIZE,
             )
         };
 
@@ -312,35 +310,36 @@ pub(crate) fn bytes_needed<C: Config>(slot_count: usize) -> usize {
     let size_of_entry = size_of::<Entry<C::EncodedKey, C::EncodedValue>>();
     let size_of_metadata = size_of::<EntryMetadata>();
 
-    HEADER_SIZE + slot_count * (size_of_entry + size_of_metadata)
+    HEADER_SIZE + slot_count * size_of_entry + (slot_count + GROUP_SIZE) * size_of_metadata
 }
 
 pub(crate) fn allocate<C: Config>(
     slot_count: usize,
     item_count: usize,
-    max_load_factor_percent: u8,
+    max_load_factor: Factor,
 ) -> Allocation<C, Box<[u8]>> {
     let bytes = vec![0u8; bytes_needed::<C>(slot_count)].into_boxed_slice();
-    init_in_place::<C, _>(bytes, slot_count, item_count, max_load_factor_percent)
+    init_in_place::<C, _>(bytes, slot_count, item_count, max_load_factor)
 }
 
 pub(crate) fn init_in_place<C: Config, M: BorrowMut<[u8]>>(
     mut bytes: M,
     slot_count: usize,
     item_count: usize,
-    max_load_factor_percent: u8,
+    max_load_factor: Factor,
 ) -> Allocation<C, M> {
-    debug_assert!(bytes.borrow_mut().iter().all(|b| *b == 0));
+    Header::initialize::<C>(bytes.borrow_mut(), slot_count, item_count, max_load_factor);
 
-    Header::initialize::<C>(
-        bytes.borrow_mut(),
-        slot_count,
-        item_count,
-        max_load_factor_percent,
-    );
-
-    Allocation {
+    let mut allocation = Allocation {
         bytes,
         _config: PhantomData::default(),
+    };
+
+    {
+        let (metadata, data) = allocation.data_slices_mut();
+        metadata.fill(0xFF);
+        data.fill(Default::default());
     }
+
+    allocation
 }

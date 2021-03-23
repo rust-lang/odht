@@ -58,7 +58,7 @@
 #[cfg(feature = "nightly")]
 macro_rules! likely {
     ($x:expr) => {
-        core::intrinsics::likely($x)
+        std::intrinsics::likely($x)
     };
 }
 
@@ -72,7 +72,7 @@ macro_rules! likely {
 #[cfg(feature = "nightly")]
 macro_rules! unlikely {
     ($x:expr) => {
-        core::intrinsics::unlikely($x)
+        std::intrinsics::unlikely($x)
     };
 }
 
@@ -87,6 +87,7 @@ mod error;
 mod fxhash;
 mod memory_layout;
 mod raw_table;
+mod swisstable_group_query;
 mod unhash;
 
 use error::Error;
@@ -96,6 +97,7 @@ pub use crate::fxhash::FxHashFn;
 pub use crate::unhash::UnHashFn;
 
 use crate::raw_table::{ByteArray, RawIter, RawTable, RawTableMut};
+use crate::swisstable_group_query::GROUP_SIZE;
 
 /// This trait provides a complete "configuration" for a hash table, i.e. it
 /// defines the key and value types, how these are encoded and what hash
@@ -137,7 +139,6 @@ pub trait HashFn: Eq {
 
 #[derive(Clone)]
 pub struct HashTableOwned<C: Config> {
-    max_item_count: usize,
     allocation: memory_layout::Allocation<C, Box<[u8]>>,
 }
 
@@ -154,36 +155,59 @@ impl<C: Config> HashTableOwned<C> {
         assert!(max_load_factor_percent <= 100);
         assert!(max_load_factor_percent > 0);
 
-        let slots_needed = slots_needed(max_item_count, max_load_factor_percent);
+        Self::with_capacity_internal(
+            max_item_count,
+            Factor::from_percent(max_load_factor_percent),
+        )
+    }
+
+    fn with_capacity_internal(max_item_count: usize, max_load_factor: Factor) -> HashTableOwned<C> {
+        let slots_needed = slots_needed(max_item_count, max_load_factor);
         assert!(slots_needed > 0);
 
-        let max_item_count = max_item_count_for(slots_needed, max_load_factor_percent);
+        let allocation = memory_layout::allocate(slots_needed, 0, max_load_factor);
 
-        let allocation = memory_layout::allocate(slots_needed, 0, max_load_factor_percent);
-
-        HashTableOwned {
-            allocation,
-            max_item_count,
-        }
+        HashTableOwned { allocation }
     }
 
     /// Retrieves the value for the given key. Returns `None` if no entry is found.
     #[inline]
     pub fn get(&self, key: &C::Key) -> Option<C::Value> {
         let encoded_key = C::encode_key(key);
-        self.as_raw().find(&encoded_key).map(C::decode_value)
+        if let Some(encoded_value) = self.as_raw().find(&encoded_key) {
+            Some(C::decode_value(encoded_value))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn contains_key(&self, key: &C::Key) -> bool {
+        let encoded_key = C::encode_key(key);
+        self.as_raw().find(&encoded_key).is_some()
     }
 
     /// Inserts the given key-value pair into the table.
     /// Grows the table if necessary.
     #[inline]
     pub fn insert(&mut self, key: &C::Key, value: &C::Value) -> Option<C::Value> {
-        let item_count = self.allocation.header().item_count();
-        if unlikely!(item_count == self.max_item_count) {
+        let (item_count, max_item_count) = {
+            let header = self.allocation.header();
+            let max_item_count = max_item_count_for(header.slot_count(), header.max_load_factor());
+            (header.item_count(), max_item_count)
+        };
+
+        if unlikely!(item_count == max_item_count) {
             self.grow();
         }
 
-        assert!(item_count < self.max_item_count);
+        debug_assert!(
+            item_count
+                < max_item_count_for(
+                    self.allocation.header().slot_count(),
+                    self.allocation.header().max_load_factor()
+                )
+        );
 
         let encoded_key = C::encode_key(key);
         let encoded_value = C::encode_value(value);
@@ -250,15 +274,7 @@ impl<C: Config> HashTableOwned<C> {
         let data = data.to_owned().into_boxed_slice();
         let allocation = memory_layout::Allocation::from_raw_bytes(data)?;
 
-        let max_item_count = max_item_count_for(
-            allocation.header().slot_count(),
-            allocation.header().max_load_factor_percent(),
-        );
-
-        Ok(HashTableOwned {
-            allocation,
-            max_item_count,
-        })
+        Ok(HashTableOwned { allocation })
     }
 
     #[inline]
@@ -266,15 +282,7 @@ impl<C: Config> HashTableOwned<C> {
         let data = data.to_owned().into_boxed_slice();
         let allocation = memory_layout::Allocation::from_raw_bytes_unchecked(data);
 
-        let max_item_count = max_item_count_for(
-            allocation.header().slot_count(),
-            allocation.header().max_load_factor_percent(),
-        );
-
-        HashTableOwned {
-            allocation,
-            max_item_count,
-        }
+        HashTableOwned { allocation }
     }
 
     /// Returns the number of items stored in the hash table.
@@ -305,18 +313,18 @@ impl<C: Config> HashTableOwned<C> {
     fn grow(&mut self) {
         let initial_slot_count = self.allocation.header().slot_count();
         let initial_item_count = self.allocation.header().item_count();
-        let initial_max_load_factor_percent = self.allocation.header().max_load_factor_percent();
+        let initial_max_load_factor = self.allocation.header().max_load_factor();
 
         let mut new_table =
-            Self::with_capacity(initial_item_count * 2, initial_max_load_factor_percent);
+            Self::with_capacity_internal(initial_item_count * 2, initial_max_load_factor);
 
         // Copy the entries over with the internal `insert_entry()` method,
         // which allows us to do insertions without hashing everything again.
         {
             let mut new_table = new_table.as_raw_mut();
 
-            for (entry_metadata, entry_data) in self.as_raw().iter() {
-                new_table.insert_entry(entry_metadata, *entry_data);
+            for (_, entry_data) in self.as_raw().iter() {
+                new_table.insert(entry_data.key, entry_data.value);
             }
         }
 
@@ -330,20 +338,22 @@ impl<C: Config> HashTableOwned<C> {
         assert!(self.allocation.header().slot_count() >= 2 * initial_slot_count);
         assert_eq!(self.allocation.header().item_count(), initial_item_count);
         assert_eq!(
-            self.allocation.header().max_load_factor_percent(),
-            initial_max_load_factor_percent
+            self.allocation.header().max_load_factor(),
+            initial_max_load_factor
         );
     }
 }
 
 impl<C: Config> std::fmt::Debug for HashTableOwned<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let header = self.allocation.header();
+
         writeln!(
             f,
-            "(item_count={}, max_item_count={}, max_load_factor={})",
-            self.allocation.header().item_count(),
-            self.max_item_count,
-            self.allocation.header().max_load_factor_percent(),
+            "(item_count={}, max_item_count={}, max_load_factor={}%)",
+            header.item_count(),
+            max_item_count_for(header.slot_count(), header.max_load_factor()),
+            header.max_load_factor().to_percent(),
         )?;
 
         writeln!(f, "{:?}", self.as_raw())
@@ -365,7 +375,6 @@ impl<C: Config, D: Borrow<[u8]>> HashTable<C, D> {
     /// data of the hash table. It will not copy any data.
     pub fn from_raw_bytes(data: D) -> Result<HashTable<C, D>, Box<dyn std::error::Error>> {
         let allocation = memory_layout::Allocation::from_raw_bytes(data)?;
-
         Ok(HashTable { allocation })
     }
 
@@ -418,7 +427,8 @@ impl<C: Config, D: Borrow<[u8]> + BorrowMut<[u8]>> HashTable<C, D> {
         max_item_count: usize,
         max_load_factor_percent: u8,
     ) -> Result<HashTable<C, D>, Box<dyn std::error::Error>> {
-        let byte_count = bytes_needed::<C>(max_item_count, max_load_factor_percent);
+        let max_load_factor = Factor::from_percent(max_load_factor_percent);
+        let byte_count = bytes_needed_internal::<C>(max_item_count, max_load_factor);
         if data.borrow_mut().len() != byte_count {
             return Err(Error(format!(
                 "byte slice to initialize has wrong length ({} instead of {})",
@@ -427,10 +437,8 @@ impl<C: Config, D: Borrow<[u8]> + BorrowMut<[u8]>> HashTable<C, D> {
             )))?;
         }
 
-        data.borrow_mut().fill(0);
-        let slot_count = slots_needed(max_item_count, max_load_factor_percent);
-        let allocation =
-            memory_layout::init_in_place::<C, _>(data, slot_count, 0, max_load_factor_percent);
+        let slot_count = slots_needed(max_item_count, max_load_factor);
+        let allocation = memory_layout::init_in_place::<C, _>(data, slot_count, 0, max_load_factor);
         Ok(HashTable { allocation })
     }
 
@@ -446,12 +454,12 @@ impl<C: Config, D: Borrow<[u8]> + BorrowMut<[u8]>> HashTable<C, D> {
     #[inline]
     pub fn insert(&mut self, key: &C::Key, value: &C::Value) -> Option<C::Value> {
         let item_count = self.allocation.header().item_count();
-        let max_load_factor_percent = self.allocation.header().max_load_factor_percent();
+        let max_load_factor = self.allocation.header().max_load_factor();
         let slot_count = self.allocation.header().slot_count();
         // FIXME: This is actually a bit to conservative because it does not account for
         //        cases where an entry is overwritten and thus the item count does not
         //        change.
-        assert!(item_count < max_item_count_for(slot_count, max_load_factor_percent));
+        assert!(item_count < max_item_count_for(slot_count, max_load_factor));
 
         let encoded_key = C::encode_key(key);
         let encoded_value = C::encode_value(value);
@@ -469,7 +477,12 @@ impl<C: Config, D: Borrow<[u8]> + BorrowMut<[u8]>> HashTable<C, D> {
 /// given max item count and load factor. The result can be used for allocating
 /// storage to be passed into [HashTable::init_in_place].
 pub fn bytes_needed<C: Config>(max_item_count: usize, max_load_factor_percent: u8) -> usize {
-    let slot_count = slots_needed(max_item_count, max_load_factor_percent);
+    let max_load_factor = Factor::from_percent(max_load_factor_percent);
+    bytes_needed_internal::<C>(max_item_count, max_load_factor)
+}
+
+fn bytes_needed_internal<C: Config>(max_item_count: usize, max_load_factor: Factor) -> usize {
+    let slot_count = slots_needed(max_item_count, max_load_factor);
     memory_layout::bytes_needed::<C>(slot_count)
 }
 
@@ -490,17 +503,51 @@ impl<'a, C: Config> Iterator for Iter<'a, C> {
 
 // We use integer math here as not to run into any issues with
 // platform-specific floating point math implementation.
-fn slots_needed(item_count: usize, max_load_factor_percent: u8) -> usize {
-    let max_load_factor_percent = max_load_factor_percent as usize;
+fn slots_needed(item_count: usize, max_load_factor: Factor) -> usize {
     // Note: we round up here
-    let slots_needed = (100 * item_count + max_load_factor_percent - 1) / max_load_factor_percent;
-    slots_needed.checked_next_power_of_two().unwrap()
+    let slots_needed = max_load_factor.apply_inverse(item_count);
+    std::cmp::max(
+        slots_needed.checked_next_power_of_two().unwrap(),
+        GROUP_SIZE,
+    )
 }
 
-fn max_item_count_for(slot_count: usize, max_load_factor_percent: u8) -> usize {
-    let max_load_factor_percent = max_load_factor_percent as usize;
+fn max_item_count_for(slot_count: usize, max_load_factor: Factor) -> usize {
     // Note: we round down here
-    (max_load_factor_percent * slot_count) / 100
+    max_load_factor.apply(slot_count)
+}
+
+/// This type is used for computing max item counts for a given load factor
+/// efficiently. We use integer math here so that things are the same on
+/// all platforms and with all compiler settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Factor(pub u16);
+
+impl Factor {
+    const BASE: usize = u16::MAX as usize;
+
+    #[inline]
+    fn from_percent(percent: u8) -> Factor {
+        let percent = percent as usize;
+        Factor(((percent * Self::BASE) / 100) as u16)
+    }
+
+    fn to_percent(self) -> usize {
+        (self.0 as usize * 100) / Self::BASE
+    }
+
+    // Note: we round down here
+    #[inline]
+    fn apply(self, x: usize) -> usize {
+        (x * self.0 as usize) >> 16
+    }
+
+    // Note: we round up here
+    #[inline]
+    fn apply_inverse(self, x: usize) -> usize {
+        let factor = self.0 as usize;
+        (Self::BASE * x + factor - 1) / factor
+    }
 }
 
 #[cfg(test)]
@@ -634,16 +681,17 @@ mod tests {
 
     #[test]
     fn load_factor_and_item_count() {
-        assert_eq!(slots_needed(0, 100), 1);
-        assert_eq!(slots_needed(6, 60), 16);
-        assert_eq!(slots_needed(5, 50), 16);
-        assert_eq!(slots_needed(5, 49), 16);
-        assert_eq!(slots_needed(1000, 100), 1024);
+        assert_eq!(slots_needed(0, Factor::from_percent(100)), 16);
+        assert_eq!(slots_needed(6, Factor::from_percent(60)), 16);
+        assert_eq!(slots_needed(5, Factor::from_percent(50)), 16);
+        assert_eq!(slots_needed(5, Factor::from_percent(49)), 16);
+        assert_eq!(slots_needed(1000, Factor::from_percent(100)), 1024);
 
-        assert_eq!(max_item_count_for(1, 100), 1);
-        assert_eq!(max_item_count_for(10, 50), 5);
-        assert_eq!(max_item_count_for(11, 50), 5);
-        assert_eq!(max_item_count_for(12, 50), 6);
+        // Factor cannot never be a full 100% because of the rounding involved.
+        assert_eq!(max_item_count_for(10, Factor::from_percent(100)), 9);
+        assert_eq!(max_item_count_for(10, Factor::from_percent(50)), 4);
+        assert_eq!(max_item_count_for(11, Factor::from_percent(50)), 5);
+        assert_eq!(max_item_count_for(12, Factor::from_percent(50)), 5);
     }
 
     #[test]
@@ -654,5 +702,19 @@ mod tests {
         for (key, value) in items.iter() {
             assert_eq!(table.insert(key, value), None);
         }
+    }
+
+    #[test]
+    fn factor_from_percent() {
+        assert_eq!(Factor::from_percent(100), Factor(u16::MAX));
+        assert_eq!(Factor::from_percent(0), Factor(0));
+        assert_eq!(Factor::from_percent(50), Factor(u16::MAX / 2));
+    }
+
+    #[test]
+    fn factor_apply() {
+        assert_eq!(Factor::from_percent(100).apply(12345), 12344);
+        assert_eq!(Factor::from_percent(0).apply(12345), 0);
+        assert_eq!(Factor::from_percent(50).apply(66), 32);
     }
 }
