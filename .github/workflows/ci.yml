@@ -21,6 +21,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+    - name: Update Stable Rust
+      run: rustup update stable
     - name: Check formatting
       run: cargo fmt -- --check
     - name: Run tests
