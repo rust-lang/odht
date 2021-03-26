@@ -55,6 +55,9 @@
 
 #![cfg_attr(feature = "nightly", feature(core_intrinsics))]
 
+#[cfg(test)]
+extern crate quickcheck;
+
 #[cfg(feature = "nightly")]
 macro_rules! likely {
     ($x:expr) => {
@@ -252,7 +255,8 @@ impl<C: Config> HashTableOwned<C> {
                 table.insert(&k, &v);
             }
 
-            assert_eq!(table.len(), known_size);
+            // duplicates
+            assert!(table.len() <= known_size);
             assert_eq!(table.allocation.header().slot_count(), initial_slot_count);
 
             table
@@ -716,5 +720,177 @@ mod tests {
         assert_eq!(Factor::from_percent(100).apply(12345), 12344);
         assert_eq!(Factor::from_percent(0).apply(12345), 0);
         assert_eq!(Factor::from_percent(50).apply(66), 32);
+    }
+
+    mod quickchecks {
+        use super::*;
+        use crate::raw_table::ByteArray;
+        use quickcheck::{Arbitrary, Gen};
+        use rustc_hash::FxHashMap;
+
+        #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
+        struct Bytes<const BYTE_COUNT: usize>([u8; BYTE_COUNT]);
+
+        impl<const L: usize> Arbitrary for Bytes<L> {
+            fn arbitrary(gen: &mut Gen) -> Self {
+                let mut xs = [0; L];
+                for x in xs.iter_mut() {
+                    *x = u8::arbitrary(gen);
+                }
+                Bytes(xs)
+            }
+        }
+
+        impl<const L: usize> Default for Bytes<L> {
+            fn default() -> Self {
+                Bytes([0; L])
+            }
+        }
+
+        impl<const L: usize> ByteArray for Bytes<L> {
+            #[inline(always)]
+            fn as_slice(&self) -> &[u8] {
+                &self.0[..]
+            }
+
+            #[inline(always)]
+            fn equals(&self, other: &Self) -> bool {
+                self.as_slice() == other.as_slice()
+            }
+        }
+
+        macro_rules! mk_quick_tests {
+            ($name: ident, $key_len:expr, $value_len:expr) => {
+                mod $name {
+                    use super::*;
+                    use quickcheck::quickcheck;
+
+                    struct Cfg;
+
+                    type Key = Bytes<$key_len>;
+                    type Value = Bytes<$value_len>;
+
+                    impl Config for Cfg {
+                        type EncodedKey = Key;
+                        type EncodedValue = Value;
+
+                        type Key = Key;
+                        type Value = Value;
+
+                        type H = FxHashFn;
+
+                        fn encode_key(k: &Self::Key) -> Self::EncodedKey {
+                            *k
+                        }
+
+                        fn encode_value(v: &Self::Value) -> Self::EncodedValue {
+                            *v
+                        }
+
+                        fn decode_key(k: &Self::EncodedKey) -> Self::Key {
+                            *k
+                        }
+
+                        fn decode_value(v: &Self::EncodedValue) -> Self::Value {
+                            *v
+                        }
+                    }
+
+                    fn from_std_hashmap(m: &FxHashMap<Key, Value>) -> HashTableOwned<Cfg> {
+                        HashTableOwned::<Cfg>::from_iterator(m.iter().map(|(x, y)| (*x, *y)), 87)
+                    }
+
+                    quickcheck! {
+                        fn len(xs: FxHashMap<Key, Value>) -> bool {
+                            let table = from_std_hashmap(&xs);
+
+                            xs.len() == table.len()
+                        }
+                    }
+
+                    quickcheck! {
+                        fn lookup(xs: FxHashMap<Key, Value>) -> bool {
+                            let table = from_std_hashmap(&xs);
+                            xs.iter().all(|(k, v)| table.get(k) == Some(*v))
+                        }
+                    }
+
+                    quickcheck! {
+                        fn insert_with_duplicates(xs: Vec<(Key, Value)>) -> bool {
+                            let mut reference = FxHashMap::default();
+                            let mut table = HashTableOwned::<Cfg>::default();
+
+                            for (k, v) in xs {
+                                let expected = reference.insert(k, v);
+                                let actual = table.insert(&k, &v);
+
+                                if expected != actual {
+                                    return false;
+                                }
+                            }
+
+                            true
+                        }
+                    }
+
+                    quickcheck! {
+                        fn bytes_deterministic(xs: FxHashMap<Key, Value>) -> bool {
+                            // NOTE: We only guarantee this given the exact same
+                            //       insertion order.
+                            let table0 = from_std_hashmap(&xs);
+                            let table1 = from_std_hashmap(&xs);
+
+                            table0.raw_bytes() == table1.raw_bytes()
+                        }
+                    }
+
+                    quickcheck! {
+                        fn from_iterator_vs_manual_insertion(xs: Vec<(Key, Value)>) -> bool {
+                            let mut table0 = HashTableOwned::<Cfg>::with_capacity(xs.len(), 87);
+
+                            for (k, v) in xs.iter() {
+                                table0.insert(k, v);
+                            }
+
+                            let table1 = HashTableOwned::<Cfg>::from_iterator(xs.into_iter(), 87);
+
+                            // Requiring bit for bit equality might be a bit too much in this case,
+                            // as long as it works ...
+                            table0.raw_bytes() == table1.raw_bytes()
+                        }
+                    }
+                }
+            };
+        }
+
+        // Test zero sized key and values
+        mk_quick_tests!(k0_v0, 0, 0);
+        mk_quick_tests!(k1_v0, 1, 0);
+        mk_quick_tests!(k2_v0, 2, 0);
+        mk_quick_tests!(k3_v0, 3, 0);
+        mk_quick_tests!(k4_v0, 4, 0);
+        mk_quick_tests!(k8_v0, 8, 0);
+        mk_quick_tests!(k15_v0, 15, 0);
+        mk_quick_tests!(k16_v0, 16, 0);
+        mk_quick_tests!(k17_v0, 17, 0);
+        mk_quick_tests!(k63_v0, 63, 0);
+        mk_quick_tests!(k64_v0, 64, 0);
+
+        // Test a few different key sizes
+        mk_quick_tests!(k2_v4, 2, 4);
+        mk_quick_tests!(k4_v4, 4, 4);
+        mk_quick_tests!(k8_v4, 8, 4);
+        mk_quick_tests!(k17_v4, 17, 4);
+        mk_quick_tests!(k20_v4, 20, 4);
+        mk_quick_tests!(k64_v4, 64, 4);
+
+        // Test a few different value sizes
+        mk_quick_tests!(k16_v1, 16, 1);
+        mk_quick_tests!(k16_v2, 16, 2);
+        mk_quick_tests!(k16_v3, 16, 3);
+        mk_quick_tests!(k16_v4, 16, 4);
+        mk_quick_tests!(k16_v8, 16, 8);
+        mk_quick_tests!(k16_v16, 16, 16);
+        mk_quick_tests!(k16_v17, 16, 17);
     }
 }
