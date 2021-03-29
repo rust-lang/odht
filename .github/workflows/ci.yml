@@ -45,4 +45,4 @@ jobs:
     - name: Install nightly Rust
       run: rustup override set nightly
     - name: Bench
-      run: cargo bench --verbose --features=${{ matrix.features }}
+      run: RUSTFLAGS=-Ctarget-cpu=native cargo bench --verbose --features=${{ matrix.features }}
