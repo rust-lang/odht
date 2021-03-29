@@ -685,7 +685,7 @@ mod tests {
 
     #[test]
     fn load_factor_and_item_count() {
-        assert_eq!(slots_needed(0, Factor::from_percent(100)), 16);
+        assert_eq!(slots_needed(0, Factor::from_percent(100)), GROUP_SIZE);
         assert_eq!(slots_needed(6, Factor::from_percent(60)), 16);
         assert_eq!(slots_needed(5, Factor::from_percent(50)), 16);
         assert_eq!(slots_needed(5, Factor::from_percent(49)), 16);

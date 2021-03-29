@@ -13,21 +13,33 @@ cfg_if::cfg_if! {
     }
 }
 
-pub(crate) use imp::GroupQuery;
+pub use imp::GroupQuery;
+pub use imp::GROUP_SIZE;
 
-pub(crate) const GROUP_SIZE: usize = 16;
+// While GROUP_SIZE is target-dependent for performance reasons,
+// we always do probing as if it was the same as REFERENCE_GROUP_SIZE.
+// This way the same slot indices will be assigned to the same
+// entries no matter the underlying target. This allows the
+// binary format of the table to be portable.
+pub const REFERENCE_GROUP_SIZE: usize = 16;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const EMPTY_GROUP: [u8; 16] = [
-        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-    ];
+    const EMPTY_GROUP: [u8; GROUP_SIZE] = [255; GROUP_SIZE];
+
+    fn full_group() -> [u8; GROUP_SIZE] {
+        let mut group = [0; GROUP_SIZE];
+        for i in 0..group.len() {
+            group[i] = i as u8;
+        }
+        group
+    }
 
     #[test]
     fn full() {
-        let mut q = GroupQuery::from(&[0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7], 42);
+        let mut q = GroupQuery::from(&full_group(), 42);
 
         assert_eq!(Iterator::count(&mut q), 0);
         assert!(!q.any_empty());
@@ -45,7 +57,7 @@ mod tests {
 
     #[test]
     fn partially_filled() {
-        for filled_up_to_index in 0..=14 {
+        for filled_up_to_index in 0..=(GROUP_SIZE - 2) {
             let mut group = EMPTY_GROUP;
 
             for i in 0..=filled_up_to_index {
@@ -62,26 +74,43 @@ mod tests {
 
     #[test]
     fn match_iter() {
-        let group = [0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0];
+        let expected: Vec<_> = (0..GROUP_SIZE).filter(|x| x % 3 == 0).collect();
 
-        let mut q = GroupQuery::from(&group, 1);
+        let mut group = full_group();
+
+        for i in &expected {
+            group[*i] = 103;
+        }
+
+        let mut q = GroupQuery::from(&group, 103);
 
         let matches: Vec<usize> = (&mut q).collect();
 
-        assert_eq!(matches, vec![1, 4, 7, 12, 13]);
+        assert_eq!(matches, expected);
         assert!(!q.any_empty());
         assert_eq!(q.first_empty(), None);
     }
 
     #[test]
-    fn match_iter_with_emtpy() {
-        let group = [0, 1, 0, 255, 1, 0, 0, 1, 0, 255, 0, 0, 1, 1, 0, 0];
+    fn match_iter_with_empty() {
+        let expected: Vec<_> = (0..GROUP_SIZE).filter(|x| x % 3 == 2).collect();
 
-        let mut q = GroupQuery::from(&group, 1);
+        let mut group = full_group();
+
+        for i in &expected {
+            group[*i] = 99;
+        }
+
+        // Clear a few slots
+        group[3] = 255;
+        group[4] = 255;
+        group[GROUP_SIZE - 1] = 255;
+
+        let mut q = GroupQuery::from(&group, 99);
 
         let matches: Vec<usize> = (&mut q).collect();
 
-        assert_eq!(matches, vec![1, 4, 7, 12, 13]);
+        assert_eq!(matches, expected);
         assert!(q.any_empty());
         assert_eq!(q.first_empty(), Some(3));
     }

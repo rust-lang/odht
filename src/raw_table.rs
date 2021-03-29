@@ -10,7 +10,7 @@
 //! LLVM to retain the information about byte array sizes, even though they are
 //! converted to slices (of unknown size) from time to time.
 
-use crate::swisstable_group_query::{GroupQuery, GROUP_SIZE};
+use crate::swisstable_group_query::{GroupQuery, GROUP_SIZE, REFERENCE_GROUP_SIZE};
 use crate::{error::Error, HashFn};
 use std::convert::TryInto;
 use std::{fmt, marker::PhantomData, mem::size_of};
@@ -58,25 +58,60 @@ fn h2(h: HashValue) -> u8 {
     (h >> SHIFT) as u8
 }
 
-struct PropeSeq {
+/// This type implements the sequence in which slots are probed when resolving
+/// hash value conflicts. Note that probing is always done as if `GROUP_SIZE`
+/// was 16, even though on targets without sse2 `GROUP_SIZE` is going to be
+/// smaller. By keeping the probing pattern constant (i.e. always visiting
+/// the same slots in the same order, independently of `GROUP_SIZE`) we enable
+/// the hash table layout to be target-independent. In other words: A hash
+/// table created and persisted on a target with `GROUP_SIZE` x can always
+/// be loaded and read on a target with a different `GROUP_SIZE` y.
+struct ProbeSeq {
     index: usize,
+    base: usize,
+    chunk_index: usize,
     stride: usize,
 }
 
-impl PropeSeq {
+impl ProbeSeq {
     #[inline]
-    fn new(h1: usize, mask: usize) -> PropeSeq {
-        PropeSeq {
-            index: h1 & mask,
+    fn new(h1: usize, mask: usize) -> ProbeSeq {
+        let initial_index = h1 & mask;
+
+        ProbeSeq {
+            index: initial_index,
+            base: initial_index,
+            chunk_index: 0,
             stride: 0,
         }
     }
 
     #[inline]
-    fn advance(&mut self, mask: usize) {
-        self.stride += GROUP_SIZE;
-        self.index += self.stride;
-        self.index &= mask;
+    fn advance(&mut self, mask: usize, group_size: usize) {
+        debug_assert!(group_size <= REFERENCE_GROUP_SIZE);
+        debug_assert!(REFERENCE_GROUP_SIZE % group_size == 0);
+
+        // The effect of the code in the two branches is
+        // identical if GROUP_SIZE==REFERENCE_GROUP_SIZE
+        // but the if statement should make it very easy
+        // for the compiler to discard the more costly
+        // version and only emit the simplified version.
+
+        if group_size == REFERENCE_GROUP_SIZE {
+            self.stride += REFERENCE_GROUP_SIZE;
+            self.index += self.stride;
+            self.index &= mask;
+        } else {
+            self.chunk_index += group_size;
+
+            if self.chunk_index == REFERENCE_GROUP_SIZE {
+                self.chunk_index = 0;
+                self.stride += REFERENCE_GROUP_SIZE;
+                self.base += self.stride;
+            }
+
+            self.index = (self.base + self.chunk_index) & mask;
+        }
     }
 }
 
@@ -140,7 +175,7 @@ where
 
         let mask = self.data.len() - 1;
         let hash = H::hash(key.as_slice());
-        let mut ps = PropeSeq::new(h1(hash), mask);
+        let mut ps = ProbeSeq::new(h1(hash), mask);
         let h2 = h2(hash);
 
         loop {
@@ -160,7 +195,7 @@ where
                 return None;
             }
 
-            ps.advance(mask);
+            ps.advance(mask, GROUP_SIZE);
         }
     }
 
@@ -255,13 +290,13 @@ where
     ///          somewhere. If there isn't it will end up in an infinite loop.
     #[inline]
     pub(crate) fn insert(&mut self, key: K, value: V) -> Option<V> {
-        assert!(self.data.len().is_power_of_two());
+        debug_assert!(self.data.len().is_power_of_two());
         debug_assert!(self.metadata.len() == self.data.len() + GROUP_SIZE);
 
         let mask = self.data.len() - 1;
         let hash = H::hash(key.as_slice());
 
-        let mut ps = PropeSeq::new(h1(hash), mask);
+        let mut ps = ProbeSeq::new(h1(hash), mask);
         let h2 = h2(hash);
 
         loop {
@@ -296,7 +331,7 @@ where
                 return None;
             }
 
-            ps.advance(mask);
+            ps.advance(mask, GROUP_SIZE);
         }
     }
 }
@@ -340,7 +375,7 @@ where
 {
     pub(crate) fn new(metadata: &'a [EntryMetadata], data: &'a [Entry<K, V>]) -> RawIter<'a, K, V> {
         debug_assert!(data.len().is_power_of_two());
-        debug_assert!(metadata.len() == data.len() + 16);
+        debug_assert!(metadata.len() == data.len() + GROUP_SIZE);
 
         RawIter {
             metadata,
@@ -497,7 +532,7 @@ mod tests {
     ) -> (Vec<EntryMetadata>, Vec<Entry<K, V>>) {
         let size = xs.size_hint().0.next_power_of_two();
         let mut data = vec![Entry::default(); size];
-        let mut metadata = vec![255; size + 16];
+        let mut metadata = vec![255; size + GROUP_SIZE];
 
         assert!(metadata.iter().all(|b| is_empty_or_deleted(*b)));
 
@@ -557,6 +592,66 @@ mod tests {
 
             for (i, x) in xs.iter().enumerate() {
                 assert_eq!(table.find(x), Some(&[i as u8, (i + 1) as u8]));
+            }
+        }
+    }
+
+    // This test makes sure that ProbeSeq will always visit the same slots
+    // in the same order, regardless of the actual GROUP_SIZE.
+    #[test]
+    fn probe_seq() {
+        struct ReferenceProbeSeq {
+            index: usize,
+            stride: usize,
+        }
+
+        impl ReferenceProbeSeq {
+            fn new(h1: usize, mask: usize) -> ReferenceProbeSeq {
+                ReferenceProbeSeq {
+                    index: h1 & mask,
+                    stride: 0,
+                }
+            }
+
+            fn advance(&mut self, mask: usize) {
+                self.stride += REFERENCE_GROUP_SIZE;
+                self.index += self.stride;
+                self.index &= mask;
+            }
+        }
+
+        for &group_size in &[4, 8, 16] {
+            assert!(REFERENCE_GROUP_SIZE % group_size == 0);
+            assert!(REFERENCE_GROUP_SIZE >= group_size);
+
+            for i in 4 .. 17 {
+                let item_count = 1 << i;
+                assert!(item_count % REFERENCE_GROUP_SIZE == 0);
+                assert!(item_count % group_size == 0);
+
+                let mask = item_count - 1;
+
+                let mut expected = Vec::with_capacity(item_count);
+
+                let mut refseq = ReferenceProbeSeq::new(0, mask);
+                for _ in 0 .. item_count / REFERENCE_GROUP_SIZE {
+                    for index in refseq.index .. refseq.index + REFERENCE_GROUP_SIZE {
+                        expected.push(index & mask);
+                    }
+                    refseq.advance(mask);
+                }
+
+                let mut actual = Vec::with_capacity(item_count);
+
+                let mut seq = ProbeSeq::new(0, mask);
+                for _ in 0 .. item_count / group_size {
+                    for index in seq.index .. seq.index + group_size {
+                        actual.push(index & mask);
+                    }
+                    seq.advance(mask, group_size);
+                }
+
+                assert_eq!(expected, actual);
             }
         }
     }

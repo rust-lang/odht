@@ -3,7 +3,7 @@ use core::arch::x86;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64 as x86;
 
-use super::GROUP_SIZE;
+pub const GROUP_SIZE: usize = 16;
 
 pub struct GroupQuery {
     matches: u16,
