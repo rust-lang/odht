@@ -24,7 +24,7 @@ use std::{fmt, marker::PhantomData, mem::size_of};
 /// into a `&[u8]` and back, regardless of whether the byte array has been
 /// moved in the meantime.
 #[repr(C)]
-#[derive(PartialEq, Eq, Default, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub(crate) struct Entry<K: ByteArray, V: ByteArray> {
     pub key: K,
     pub value: V,
@@ -34,6 +34,16 @@ impl<K: ByteArray, V: ByteArray> Entry<K, V> {
     #[inline]
     fn new(key: K, value: V) -> Entry<K, V> {
         Entry { key, value }
+    }
+}
+
+impl<K: ByteArray, V: ByteArray> Default for Entry<K, V> {
+    #[inline]
+    fn default() -> Entry<K, V> {
+        Entry {
+            key: K::zeroed(),
+            value: V::zeroed(),
+        }
     }
 }
 
@@ -66,16 +76,16 @@ fn h2(h: HashValue) -> u8 {
 /// the hash table layout to be target-independent. In other words: A hash
 /// table created and persisted on a target with `GROUP_SIZE` x can always
 /// be loaded and read on a target with a different `GROUP_SIZE` y.
-struct ProbeSeq {
+struct ProbeSeq<const GROUP_SIZE: usize> {
     index: usize,
     base: usize,
     chunk_index: usize,
     stride: usize,
 }
 
-impl ProbeSeq {
+impl<const GROUP_SIZE: usize> ProbeSeq<GROUP_SIZE> {
     #[inline]
-    fn new(h1: usize, mask: usize) -> ProbeSeq {
+    fn new(h1: usize, mask: usize) -> Self {
         let initial_index = h1 & mask;
 
         ProbeSeq {
@@ -87,9 +97,9 @@ impl ProbeSeq {
     }
 
     #[inline]
-    fn advance(&mut self, mask: usize, group_size: usize) {
-        debug_assert!(group_size <= REFERENCE_GROUP_SIZE);
-        debug_assert!(REFERENCE_GROUP_SIZE % group_size == 0);
+    fn advance(&mut self, mask: usize) {
+        debug_assert!(GROUP_SIZE <= REFERENCE_GROUP_SIZE);
+        debug_assert!(REFERENCE_GROUP_SIZE % GROUP_SIZE == 0);
 
         // The effect of the code in the two branches is
         // identical if GROUP_SIZE==REFERENCE_GROUP_SIZE
@@ -97,12 +107,12 @@ impl ProbeSeq {
         // for the compiler to discard the more costly
         // version and only emit the simplified version.
 
-        if group_size == REFERENCE_GROUP_SIZE {
+        if GROUP_SIZE == REFERENCE_GROUP_SIZE {
             self.stride += REFERENCE_GROUP_SIZE;
             self.index += self.stride;
             self.index &= mask;
         } else {
-            self.chunk_index += group_size;
+            self.chunk_index += GROUP_SIZE;
 
             if self.chunk_index == REFERENCE_GROUP_SIZE {
                 self.chunk_index = 0;
@@ -175,7 +185,7 @@ where
 
         let mask = self.data.len() - 1;
         let hash = H::hash(key.as_slice());
-        let mut ps = ProbeSeq::new(h1(hash), mask);
+        let mut ps = ProbeSeq::<GROUP_SIZE>::new(h1(hash), mask);
         let h2 = h2(hash);
 
         loop {
@@ -184,7 +194,7 @@ where
             for m in &mut group_query {
                 let index = (ps.index + m) & mask;
 
-                let entry = self.entry_at(index);
+                let entry = entry_at(self.data, index);
 
                 if likely!(entry.key.equals(key)) {
                     return Some(&entry.value);
@@ -195,7 +205,7 @@ where
                 return None;
             }
 
-            ps.advance(mask, GROUP_SIZE);
+            ps.advance(mask);
         }
     }
 
@@ -239,12 +249,18 @@ where
 
         Ok(())
     }
+}
 
-    #[inline]
-    fn entry_at(&self, index: usize) -> &Entry<K, V> {
-        debug_assert!(index < self.data.len());
-        unsafe { self.data.get_unchecked(index) }
-    }
+#[inline]
+fn entry_at<K: ByteArray, V: ByteArray>(data: &[Entry<K, V>], index: usize) -> &Entry<K, V> {
+    debug_assert!(index < data.len());
+    unsafe { data.get_unchecked(index) }
+}
+
+#[inline]
+fn metadata_at(metadata: &[EntryMetadata], index: usize) -> &EntryMetadata {
+    debug_assert!(index < metadata.len());
+    unsafe { metadata.get_unchecked(index) }
 }
 
 /// This type provides a mutable view of the given table data. It allows for
@@ -296,7 +312,7 @@ where
         let mask = self.data.len() - 1;
         let hash = H::hash(key.as_slice());
 
-        let mut ps = ProbeSeq::new(h1(hash), mask);
+        let mut ps = ProbeSeq::<GROUP_SIZE>::new(h1(hash), mask);
         let h2 = h2(hash);
 
         loop {
@@ -331,7 +347,7 @@ where
                 return None;
             }
 
-            ps.advance(mask, GROUP_SIZE);
+            ps.advance(mask);
         }
     }
 }
@@ -394,7 +410,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if self.current_index == self.data.len() {
+            if self.current_index >= self.data.len() {
                 return None;
             }
 
@@ -402,9 +418,9 @@ where
 
             self.current_index += 1;
 
-            let entry_metadata = self.metadata[index];
+            let entry_metadata = *metadata_at(self.metadata, index);
             if !is_empty_or_deleted(entry_metadata) {
-                return Some((entry_metadata, &self.data[index]));
+                return Some((entry_metadata, entry_at(self.data, index)));
             }
         }
     }
@@ -412,9 +428,8 @@ where
 
 /// A trait that lets us abstract over different lengths of fixed size byte
 /// arrays. Don't implement it for anything other than fixed size byte arrays!
-pub trait ByteArray:
-    Sized + Copy + Eq + Clone + PartialEq + Default + fmt::Debug + 'static
-{
+pub trait ByteArray: Sized + Copy + Eq + Clone + PartialEq + fmt::Debug + 'static {
+    fn zeroed() -> Self;
     fn as_slice(&self) -> &[u8];
     fn equals(&self, other: &Self) -> bool;
     fn is_all_zeros(&self) -> bool {
@@ -422,99 +437,64 @@ pub trait ByteArray:
     }
 }
 
-macro_rules! impl_byte_array {
-    ($len:expr) => {
-        impl ByteArray for [u8; $len] {
-            #[inline(always)]
-            fn as_slice(&self) -> &[u8] {
-                &self[..]
-            }
+impl<const LEN: usize> ByteArray for [u8; LEN] {
+    #[inline(always)]
+    fn zeroed() -> Self {
+        [0u8; LEN]
+    }
 
-            // This custom implementation of comparing the fixed size arrays
-            // seems make a big difference for performance (at least for
-            // 16+ byte keys)
-            #[inline]
-            fn equals(&self, other: &Self) -> bool {
-                use std::mem::size_of;
-                // Most branches here are optimized away at compile time
-                // because they depend on values known at compile time.
+    #[inline(always)]
+    fn as_slice(&self) -> &[u8] {
+        &self[..]
+    }
 
-                const USIZE: usize = size_of::<usize>();
+    // This custom implementation of comparing the fixed size arrays
+    // seems make a big difference for performance (at least for
+    // 16+ byte keys)
+    #[inline]
+    fn equals(&self, other: &Self) -> bool {
+        // Most branches here are optimized away at compile time
+        // because they depend on values known at compile time.
 
-                // Special case a few cases we care about
-                if size_of::<Self>() == USIZE {
-                    return read_usize(&self[..], 0) == read_usize(&other[..], 0);
-                }
+        const USIZE: usize = size_of::<usize>();
 
-                if size_of::<Self>() == USIZE * 2 {
-                    return read_usize(&self[..], 0) == read_usize(&other[..], 0)
-                        && read_usize(&self[..], 1) == read_usize(&other[..], 1);
-                }
-
-                if size_of::<Self>() == USIZE * 3 {
-                    return read_usize(&self[..], 0) == read_usize(&other[..], 0)
-                        && read_usize(&self[..], 1) == read_usize(&other[..], 1)
-                        && read_usize(&self[..], 2) == read_usize(&other[..], 2);
-                }
-
-                if size_of::<Self>() == USIZE * 4 {
-                    return read_usize(&self[..], 0) == read_usize(&other[..], 0)
-                        && read_usize(&self[..], 1) == read_usize(&other[..], 1)
-                        && read_usize(&self[..], 2) == read_usize(&other[..], 2)
-                        && read_usize(&self[..], 3) == read_usize(&other[..], 3);
-                }
-
-                // fallback
-                return &self[..] == &other[..];
-
-                #[inline(always)]
-                fn read_usize(bytes: &[u8], index: usize) -> usize {
-                    use std::convert::TryInto;
-                    const STRIDE: usize = size_of::<usize>();
-                    usize::from_le_bytes(
-                        bytes[STRIDE * index..STRIDE * (index + 1)]
-                            .try_into()
-                            .unwrap(),
-                    )
-                }
-            }
+        // Special case a few cases we care about
+        if size_of::<Self>() == USIZE {
+            return read_usize(&self[..], 0) == read_usize(&other[..], 0);
         }
-    };
-}
 
-impl_byte_array!(0);
-impl_byte_array!(1);
-impl_byte_array!(2);
-impl_byte_array!(3);
-impl_byte_array!(4);
-impl_byte_array!(5);
-impl_byte_array!(6);
-impl_byte_array!(7);
-impl_byte_array!(8);
-impl_byte_array!(9);
-impl_byte_array!(10);
-impl_byte_array!(11);
-impl_byte_array!(12);
-impl_byte_array!(13);
-impl_byte_array!(14);
-impl_byte_array!(15);
-impl_byte_array!(16);
-impl_byte_array!(17);
-impl_byte_array!(18);
-impl_byte_array!(19);
-impl_byte_array!(20);
-impl_byte_array!(21);
-impl_byte_array!(22);
-impl_byte_array!(23);
-impl_byte_array!(24);
-impl_byte_array!(25);
-impl_byte_array!(26);
-impl_byte_array!(27);
-impl_byte_array!(28);
-impl_byte_array!(29);
-impl_byte_array!(30);
-impl_byte_array!(31);
-impl_byte_array!(32);
+        if size_of::<Self>() == USIZE * 2 {
+            return read_usize(&self[..], 0) == read_usize(&other[..], 0)
+                && read_usize(&self[..], 1) == read_usize(&other[..], 1);
+        }
+
+        if size_of::<Self>() == USIZE * 3 {
+            return read_usize(&self[..], 0) == read_usize(&other[..], 0)
+                && read_usize(&self[..], 1) == read_usize(&other[..], 1)
+                && read_usize(&self[..], 2) == read_usize(&other[..], 2);
+        }
+
+        if size_of::<Self>() == USIZE * 4 {
+            return read_usize(&self[..], 0) == read_usize(&other[..], 0)
+                && read_usize(&self[..], 1) == read_usize(&other[..], 1)
+                && read_usize(&self[..], 2) == read_usize(&other[..], 2)
+                && read_usize(&self[..], 3) == read_usize(&other[..], 3);
+        }
+
+        // fallback
+        return &self[..] == &other[..];
+
+        #[inline(always)]
+        fn read_usize(bytes: &[u8], index: usize) -> usize {
+            const STRIDE: usize = size_of::<usize>();
+            usize::from_le_bytes(
+                bytes[STRIDE * index..STRIDE * (index + 1)]
+                    .try_into()
+                    .unwrap(),
+            )
+        }
+    }
+}
 
 #[cfg(test)]
 #[rustfmt::skip]
@@ -620,14 +600,14 @@ mod tests {
             }
         }
 
-        for &group_size in &[4, 8, 16] {
-            assert!(REFERENCE_GROUP_SIZE % group_size == 0);
-            assert!(REFERENCE_GROUP_SIZE >= group_size);
+        fn test_with_group_size<const GROUP_SIZE: usize>() {
+            assert!(REFERENCE_GROUP_SIZE % GROUP_SIZE == 0);
+            assert!(REFERENCE_GROUP_SIZE >= GROUP_SIZE);
 
             for i in 4 .. 17 {
                 let item_count = 1 << i;
                 assert!(item_count % REFERENCE_GROUP_SIZE == 0);
-                assert!(item_count % group_size == 0);
+                assert!(item_count % GROUP_SIZE == 0);
 
                 let mask = item_count - 1;
 
@@ -643,16 +623,20 @@ mod tests {
 
                 let mut actual = Vec::with_capacity(item_count);
 
-                let mut seq = ProbeSeq::new(0, mask);
-                for _ in 0 .. item_count / group_size {
-                    for index in seq.index .. seq.index + group_size {
+                let mut seq = ProbeSeq::<GROUP_SIZE>::new(0, mask);
+                for _ in 0 .. item_count / GROUP_SIZE {
+                    for index in seq.index .. seq.index + GROUP_SIZE {
                         actual.push(index & mask);
                     }
-                    seq.advance(mask, group_size);
+                    seq.advance(mask);
                 }
 
                 assert_eq!(expected, actual);
             }
         }
+
+        test_with_group_size::<4>();
+        test_with_group_size::<8>();
+        test_with_group_size::<16>();
     }
 }
