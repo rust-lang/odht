@@ -402,6 +402,12 @@ impl<C: Config, D: Borrow<[u8]>> HashTable<C, D> {
     }
 
     #[inline]
+    pub fn contains_key(&self, key: &C::Key) -> bool {
+        let encoded_key = C::encode_key(key);
+        self.as_raw().find(&encoded_key).is_some()
+    }
+
+    #[inline]
     pub fn iter(&self) -> Iter<'_, C> {
         let (entry_metadata, entry_data) = self.allocation.data_slices();
         Iter(RawIter::new(entry_metadata, entry_data))
@@ -748,6 +754,11 @@ mod tests {
         }
 
         impl<const L: usize> ByteArray for Bytes<L> {
+            #[inline(always)]
+            fn zeroed() -> Self {
+                Bytes([0u8; L])
+            }
+
             #[inline(always)]
             fn as_slice(&self) -> &[u8] {
                 &self.0[..]
