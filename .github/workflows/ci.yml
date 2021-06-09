@@ -46,3 +46,28 @@ jobs:
       run: rustup override set nightly
     - name: Bench
       run: RUSTFLAGS=-Ctarget-cpu=native cargo bench --verbose --features=${{ matrix.features }}
+
+  test-with-sanitizer:
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["nightly", "nightly,no_simd"]
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install nightly Rust
+      run: rustup override set nightly
+    - name: Test with Address Sanitizer
+      run: |
+        rustup component add rust-src --toolchain nightly
+        cargo clean
+        export RUSTFLAGS=-Zsanitizer=address
+        export RUSTDOCFLAGS=-Zsanitizer=address
+        cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --verbose --features=${{ matrix.features }}
+        cargo clean
+        export RUSTFLAGS='-Zsanitizer=memory -Zsanitizer-memory-track-origins'
+        export RUSTDOCFLAGS='-Zsanitizer=memory -Zsanitizer-memory-track-origins'
+        cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --verbose --features=${{ matrix.features }}
+
