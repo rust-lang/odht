@@ -12,3 +12,6 @@ The goal of the implementation is to provide a data structure that
 - is independent of alignment requirements so that
   - its use is not restricted to certain classes of CPUs, and
   - the data structure can be mapped to arbitrary memory addresses.
+
+This crate is developed and maintained by the Rust compiler team for internal use within `rustc`.
+This crate will have regular breaking changes and provides no stability guarantees.
