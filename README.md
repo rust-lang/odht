@@ -1,4 +1,4 @@
-![CI Status](https://github.com/michaelwoerister/odht/actions/workflows/ci.yml/badge.svg)
+![CI Status](https://github.com/rust-lang/odht/actions/workflows/ci.yml/badge.svg)
 
 # odht
 

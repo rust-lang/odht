@@ -1,11 +1,11 @@
 [package]
 name = "odht"
 version = "0.1.0"
-authors = ["Michael Woerister <michaelwoerister@posteo.de>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
 exclude = ["/.github/*"]
 description = "A Rust crate for hash tables that can be mapped from disk into memory without the need for up-front decoding."
+repository = "https://github.com/rust-lang/odht"
 
 [dependencies]
 cfg-if = "1.0.0"
