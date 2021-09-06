@@ -219,15 +219,15 @@ where
         };
 
         unsafe {
-            debug_assert_eq!(
-                raw_bytes.as_ptr().offset(raw_bytes.len() as isize),
+            assert!(
+                raw_bytes.as_ptr().offset(raw_bytes.len() as isize) ==
                 entry_metadata
                     .as_ptr()
                     .offset(entry_metadata.len() as isize) as *const u8
             );
 
-            debug_assert_eq!(
-                entry_data.as_ptr().offset(entry_data.len() as isize) as *const u8,
+            assert!(
+                entry_data.as_ptr().offset(entry_data.len() as isize) as *const u8 ==
                 entry_metadata.as_ptr() as *const u8
             );
         }

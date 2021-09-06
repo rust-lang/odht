@@ -254,13 +254,15 @@ where
 #[inline]
 fn entry_at<K: ByteArray, V: ByteArray>(data: &[Entry<K, V>], index: usize) -> &Entry<K, V> {
     debug_assert!(index < data.len());
-    unsafe { data.get_unchecked(index) }
+    // unsafe { data.get_unchecked(index) }
+    &data[index]
 }
 
 #[inline]
 fn metadata_at(metadata: &[EntryMetadata], index: usize) -> &EntryMetadata {
     debug_assert!(index < metadata.len());
-    unsafe { metadata.get_unchecked(index) }
+    // unsafe { metadata.get_unchecked(index) }
+    &metadata[index]
 }
 
 /// This type provides a mutable view of the given table data. It allows for
@@ -358,13 +360,15 @@ fn entry_at_mut<K: ByteArray, V: ByteArray>(
     index: usize,
 ) -> &mut Entry<K, V> {
     debug_assert!(index < data.len());
-    unsafe { data.get_unchecked_mut(index) }
+    //unsafe { data.get_unchecked_mut(index) }
+    &mut data[index]
 }
 
 #[inline]
 fn metadata_at_mut(metadata: &mut [EntryMetadata], index: usize) -> &mut EntryMetadata {
     debug_assert!(index < metadata.len());
-    unsafe { metadata.get_unchecked_mut(index) }
+    // unsafe { metadata.get_unchecked_mut(index) }
+    &mut metadata[index]
 }
 
 impl<'a, K: ByteArray, V: ByteArray, H: HashFn> fmt::Debug for RawTableMut<'a, K, V, H> {
