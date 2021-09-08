@@ -13,6 +13,8 @@ use crate::{
     Factor,
 };
 
+const CURRENT_FILE_FORMAT_VERSION: [u8; 4] = [0, 0, 0, 1];
+
 #[repr(C)]
 #[derive(Clone)]
 pub(crate) struct Header {
@@ -25,9 +27,11 @@ pub(crate) struct Header {
     item_count: [u8; 8],
     slot_count: [u8; 8],
 
+    file_format_version: [u8; 4],
     max_load_factor: [u8; 2],
+
     // Let's keep things at least 8 byte aligned
-    padding: [u8; 6],
+    padding: [u8; 2],
 }
 
 const HEADER_TAG: [u8; 4] = *b"ODHT";
@@ -42,6 +46,13 @@ impl Header {
             return Err(Error(format!(
                 "Expected header tag {:?} but found {:?}",
                 HEADER_TAG, self.tag
+            )));
+        }
+
+        if self.file_format_version != CURRENT_FILE_FORMAT_VERSION {
+            return Err(Error(format!(
+                "Expected file format version {:?} but found {:?}",
+                CURRENT_FILE_FORMAT_VERSION, self.file_format_version
             )));
         }
 
@@ -128,8 +139,9 @@ impl Header {
             size_of_header: size_of::<Header>().try_into().unwrap(),
             item_count: (item_count as u64).to_le_bytes(),
             slot_count: (slot_count as u64).to_le_bytes(),
+            file_format_version: CURRENT_FILE_FORMAT_VERSION,
             max_load_factor: max_load_factor.0.to_le_bytes(),
-            padding: [0u8; 6],
+            padding: [0u8; 2],
         };
 
         assert_eq!(header.sanity_check::<C>(raw_bytes), Ok(()));
