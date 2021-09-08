@@ -56,10 +56,10 @@ impl Header {
             )));
         }
 
-        check_expected_size::<EntryMetadata>(self.size_of_metadata)?;
-        check_expected_size::<C::EncodedKey>(self.size_of_key)?;
-        check_expected_size::<C::EncodedValue>(self.size_of_value)?;
-        check_expected_size::<Header>(self.size_of_header)?;
+        check_expected_size::<EntryMetadata>("EntryMetadata", self.size_of_metadata)?;
+        check_expected_size::<C::EncodedKey>("Config::EncodedKey", self.size_of_key)?;
+        check_expected_size::<C::EncodedValue>("Config::EncodedValue", self.size_of_value)?;
+        check_expected_size::<Header>("Header", self.size_of_header)?;
 
         if raw_bytes.len() != bytes_needed::<C>(self.slot_count()) {
             return Err(Error(format!(
@@ -77,11 +77,12 @@ impl Header {
 
         return Ok(());
 
-        fn check_expected_size<T>(expected_size: u8) -> Result<(), Error> {
+        fn check_expected_size<T>(name: &str, expected_size: u8) -> Result<(), Error> {
             if expected_size as usize != size_of::<T>() {
                 Err(Error(format!(
-                    "Expected size of Config::RawValue to be {} but the encoded \
+                    "Expected size of {} to be {} but the encoded \
                      table specifies {}. This indicates an encoding mismatch.",
+                    name,
                     size_of::<T>(),
                     expected_size
                 )))
