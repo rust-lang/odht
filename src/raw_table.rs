@@ -49,7 +49,24 @@ impl<K: ByteArray, V: ByteArray> Default for Entry<K, V> {
 
 impl<'a, K: ByteArray, V: ByteArray, H: HashFn> fmt::Debug for RawTable<'a, K, V, H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<debug no implemented>")
+        writeln!(
+            f,
+            "RawTable (slot_count={}, hash_fn={}) {{",
+            self.data.len(),
+            std::any::type_name::<H>(),
+        )?;
+        for (index, (&metadata, entry)) in self.metadata.iter().zip(self.data.iter()).enumerate() {
+            if is_empty_or_deleted(metadata) {
+                writeln!(f, "slot {}: empty", index)?;
+            } else {
+                writeln!(
+                    f,
+                    "slot {}: key={:?}, value={:?}, control_byte={}",
+                    index, entry.key, entry.value, metadata
+                )?;
+            }
+        }
+        writeln!(f, "}}")
     }
 }
 
