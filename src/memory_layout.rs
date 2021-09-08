@@ -68,6 +68,10 @@ impl Header {
             )));
         }
 
+        // This should never actually be a problem because it should be impossible to
+        // create the underlying memory slice in the first place:
+        assert!(u64::from_le_bytes(self.slot_count) <= usize::MAX as u64);
+
         if !self.slot_count().is_power_of_two() {
             return Err(Error(format!(
                 "Slot count of hashtable should be a power of two but is {}",
