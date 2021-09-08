@@ -140,6 +140,8 @@ pub trait HashFn: Eq {
     fn hash(bytes: &[u8]) -> u32;
 }
 
+/// A [HashTableOwned] keeps the underlying data on the heap and
+/// can resize itself on demand.
 #[derive(Clone)]
 pub struct HashTableOwned<C: Config> {
     allocation: memory_layout::Allocation<C, Box<[u8]>>,
@@ -364,8 +366,9 @@ impl<C: Config> std::fmt::Debug for HashTableOwned<C> {
     }
 }
 
-/// This type provides a cheap to construct readonly view on a persisted
-/// hash table.
+/// The [HashTable] type provides a cheap way to construct a non-resizable view
+/// of a persisted hash table. If the underlying data storage `D` implements
+/// `BorrowMut<[u8]>` then the table can be modified in place.
 #[derive(Clone, Copy)]
 pub struct HashTable<C: Config, D: Borrow<[u8]>> {
     allocation: memory_layout::Allocation<C, D>,

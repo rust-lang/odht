@@ -45,6 +45,8 @@ impl HashFn for FxHashFn {
             current_hash
                 .rotate_left(5)
                 .bitxor(value)
+                // This constant is part of FxHash's definition:
+                // https://github.com/rust-lang/rustc-hash/blob/5e09ea0a1/src/lib.rs#L67
                 .wrapping_mul(0x517cc1b727220a95)
         }
 
