@@ -16,19 +16,40 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        arch: [x86_64, i686]
+        exclude:
+          # i686 does not exist for macOS
+          - os: macos-latest
+            arch: i686
 
     runs-on: ${{ matrix.os }}
+
+    env:
+      # This is string environment variable which happens to be JSON.
+      # We use the builtin fromJSON() function below to convert it into
+      # a map.
+      target_map: |
+        {
+          "ubuntu-latest": "unknown-linux-gnu",
+          "windows-latest": "pc-windows-msvc",
+          "macos-latest": "apple-darwin"
+        }
 
     steps:
     - uses: actions/checkout@v2
     - name: Update Stable Rust
       run: rustup update stable
+    - name: Install GCC multilib
+      if: ${{ matrix.arch == 'i686' && matrix.os == 'ubuntu-latest' }}
+      run: sudo apt install -y gcc-multilib
+    - name: Add target architecture
+      run: rustup target add ${{ matrix.arch }}-${{ fromJSON(env.target_map)[matrix.os] }}
     - name: Check formatting
       run: cargo fmt -- --check
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --verbose --target ${{ matrix.arch }}-${{ fromJSON(env.target_map)[matrix.os] }}
     - name: Run tests (no_simd)
-      run: cargo test --verbose --features=no_simd
+      run: cargo test --verbose --target ${{ matrix.arch }}-${{ fromJSON(env.target_map)[matrix.os] }} --features=no_simd
     - name: Build docs
       run: cargo doc --verbose
 
