@@ -341,7 +341,13 @@ impl<C: Config> HashTableOwned<C> {
 
         *self = new_table;
 
-        assert!(self.allocation.header().slot_count() >= 2 * initial_slot_count);
+        assert!(
+            self.allocation.header().slot_count() >= 2 * initial_slot_count,
+            "Allocation did not grow properly. Slot count is {} but was expected to be \
+             at least {}",
+            self.allocation.header().slot_count(),
+            2 * initial_slot_count
+        );
         assert_eq!(self.allocation.header().item_count(), initial_item_count);
         assert_eq!(
             self.allocation.header().max_load_factor(),
@@ -552,14 +558,22 @@ impl Factor {
     // Note: we round down here
     #[inline]
     fn apply(self, x: usize) -> usize {
-        (x * self.0 as usize) >> 16
+        // Let's make sure there's no overflow during the
+        // calculation below by doing everything with 128 bits.
+        let x = x as u128;
+        let factor = self.0 as u128;
+        ((x * factor) >> 16) as usize
     }
 
     // Note: we round up here
     #[inline]
     fn apply_inverse(self, x: usize) -> usize {
-        let factor = self.0 as usize;
-        (Self::BASE * x + factor - 1) / factor
+        // Let's make sure there's no overflow during the
+        // calculation below by doing everything with 128 bits.
+        let x = x as u128;
+        let factor = self.0 as u128;
+        let base = Self::BASE as u128;
+        ((base * x + factor - 1) / factor) as usize
     }
 }
 
@@ -729,6 +743,40 @@ mod tests {
         assert_eq!(Factor::from_percent(100).apply(12345), 12344);
         assert_eq!(Factor::from_percent(0).apply(12345), 0);
         assert_eq!(Factor::from_percent(50).apply(66), 32);
+
+        // Make sure we can handle large numbers without overflow
+        assert_basically_equal(Factor::from_percent(100).apply(usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn factor_apply_inverse() {
+        assert_eq!(Factor::from_percent(100).apply_inverse(12345), 12345);
+        assert_eq!(Factor::from_percent(10).apply_inverse(100), 1001);
+        assert_eq!(Factor::from_percent(50).apply_inverse(33), 67);
+
+        // // Make sure we can handle large numbers without overflow
+        assert_basically_equal(
+            Factor::from_percent(100).apply_inverse(usize::MAX),
+            usize::MAX,
+        );
+    }
+
+    fn assert_basically_equal(x: usize, y: usize) {
+        let larger_number = std::cmp::max(x, y) as f64;
+        let abs_difference = (x as f64 - y as f64).abs();
+        let difference_in_percent = (abs_difference / larger_number) * 100.0;
+
+        const MAX_ALLOWED_DIFFERENCE_IN_PERCENT: f64 = 0.01;
+
+        assert!(
+            difference_in_percent < MAX_ALLOWED_DIFFERENCE_IN_PERCENT,
+            "{} and {} differ by {:.4} percent but the maximally allowed difference \
+            is {:.2} percent. Large differences might be caused by integer overflow.",
+            x,
+            y,
+            difference_in_percent,
+            MAX_ALLOWED_DIFFERENCE_IN_PERCENT
+        );
     }
 
     mod quickchecks {
