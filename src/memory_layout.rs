@@ -38,7 +38,7 @@ const HEADER_TAG: [u8; 4] = *b"ODHT";
 const HEADER_SIZE: usize = size_of::<Header>();
 
 impl Header {
-    pub fn sanity_check<'a, C: Config>(&self, raw_bytes: &[u8]) -> Result<(), Error> {
+    pub fn sanity_check<C: Config>(&self, raw_bytes: &[u8]) -> Result<(), Error> {
         assert!(align_of::<Header>() == 1);
         assert!(HEADER_SIZE % 8 == 0);
 
