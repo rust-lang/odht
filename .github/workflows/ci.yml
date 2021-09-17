@@ -11,6 +11,19 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # CAUTION: Do not rename this job. GH expects a job with this name to pass
+  #          before it will allow merging a PR.
+  required-checks:
+    needs:
+      - build
+      - test-with-sanitizer
+    steps:
+      - name: mark the job as a success or failure
+        run: exit 0
+        shell: bash
+    name: Required Checks Passed
+    runs-on: ubuntu-latest
+
   build:
     strategy:
       fail-fast: false
