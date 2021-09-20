@@ -65,6 +65,17 @@ jobs:
       run: cargo test --verbose --target ${{ matrix.arch }}-${{ fromJSON(env.target_map)[matrix.os] }} --features=no_simd
     - name: Build docs
       run: cargo doc --verbose
+    - name: Run SIMD/no-SIMD tests
+      run: |
+        cd crosstest
+        # Create some no-simd test files
+        cargo run --verbose --features no_simd -- write
+        cargo clean
+        # Create some simd test files and test the no-simd files
+        cargo run --verbose -- write read
+        cargo clean
+        # Test the simd-enabled files we generated in the last step
+        cargo run --verbose --features no_simd -- read
 
   benchmarks:
     strategy:
