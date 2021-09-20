@@ -95,12 +95,12 @@ mod unhash;
 
 use error::Error;
 use std::borrow::{Borrow, BorrowMut};
+use swisstable_group_query::REFERENCE_GROUP_SIZE;
 
 pub use crate::fxhash::FxHashFn;
 pub use crate::unhash::UnHashFn;
 
 use crate::raw_table::{ByteArray, RawIter, RawTable, RawTableMut};
-use crate::swisstable_group_query::GROUP_SIZE;
 
 /// This trait provides a complete "configuration" for a hash table, i.e. it
 /// defines the key and value types, how these are encoded and what hash
@@ -527,7 +527,7 @@ fn slots_needed(item_count: usize, max_load_factor: Factor) -> usize {
     let slots_needed = max_load_factor.apply_inverse(item_count);
     std::cmp::max(
         slots_needed.checked_next_power_of_two().unwrap(),
-        GROUP_SIZE,
+        REFERENCE_GROUP_SIZE,
     )
 }
 
@@ -708,7 +708,10 @@ mod tests {
 
     #[test]
     fn load_factor_and_item_count() {
-        assert_eq!(slots_needed(0, Factor::from_percent(100)), GROUP_SIZE);
+        assert_eq!(
+            slots_needed(0, Factor::from_percent(100)),
+            REFERENCE_GROUP_SIZE
+        );
         assert_eq!(slots_needed(6, Factor::from_percent(60)), 16);
         assert_eq!(slots_needed(5, Factor::from_percent(50)), 16);
         assert_eq!(slots_needed(5, Factor::from_percent(49)), 16);

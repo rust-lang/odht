@@ -5,13 +5,12 @@ use std::{
     mem::{align_of, size_of},
 };
 
-use crate::Config;
 use crate::{
     error::Error,
     raw_table::{Entry, EntryMetadata, RawTable},
-    swisstable_group_query::GROUP_SIZE,
     Factor,
 };
+use crate::{swisstable_group_query::REFERENCE_GROUP_SIZE, Config};
 
 const CURRENT_FILE_FORMAT_VERSION: [u8; 4] = [0, 0, 0, 1];
 
@@ -223,7 +222,7 @@ where
         let entry_metadata = unsafe {
             std::slice::from_raw_parts(
                 raw_bytes.as_ptr().offset(metadata_offset) as *const EntryMetadata,
-                slot_count + GROUP_SIZE,
+                slot_count + REFERENCE_GROUP_SIZE,
             )
         };
 
@@ -291,7 +290,7 @@ where
         let entry_metadata = unsafe {
             std::slice::from_raw_parts_mut(
                 raw_bytes.as_mut_ptr().offset(metadata_offset) as *mut EntryMetadata,
-                slot_count + GROUP_SIZE,
+                slot_count + REFERENCE_GROUP_SIZE,
             )
         };
 
@@ -327,7 +326,9 @@ pub(crate) fn bytes_needed<C: Config>(slot_count: usize) -> usize {
     let size_of_entry = size_of::<Entry<C::EncodedKey, C::EncodedValue>>();
     let size_of_metadata = size_of::<EntryMetadata>();
 
-    HEADER_SIZE + slot_count * size_of_entry + (slot_count + GROUP_SIZE) * size_of_metadata
+    HEADER_SIZE
+        + slot_count * size_of_entry
+        + (slot_count + REFERENCE_GROUP_SIZE) * size_of_metadata
 }
 
 pub(crate) fn allocate<C: Config>(

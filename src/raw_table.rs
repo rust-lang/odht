@@ -186,7 +186,7 @@ where
         assert!(std::mem::align_of::<Entry<K, V>>() == 1);
 
         debug_assert!(data.len().is_power_of_two());
-        debug_assert!(metadata.len() == data.len() + GROUP_SIZE);
+        debug_assert!(metadata.len() == data.len() + REFERENCE_GROUP_SIZE);
 
         Self {
             metadata,
@@ -198,7 +198,7 @@ where
     #[inline]
     pub(crate) fn find(&self, key: &K) -> Option<&V> {
         debug_assert!(self.data.len().is_power_of_two());
-        debug_assert!(self.metadata.len() == self.data.len() + GROUP_SIZE);
+        debug_assert!(self.metadata.len() == self.data.len() + REFERENCE_GROUP_SIZE);
 
         let mask = self.data.len() - 1;
         let hash = H::hash(key.as_slice());
@@ -308,7 +308,7 @@ where
         assert!(std::mem::align_of::<Entry<K, V>>() == 1);
 
         debug_assert!(data.len().is_power_of_two());
-        debug_assert_eq!(metadata.len(), data.len() + GROUP_SIZE);
+        debug_assert_eq!(metadata.len(), data.len() + REFERENCE_GROUP_SIZE);
 
         Self {
             metadata,
@@ -324,7 +324,7 @@ where
     #[inline]
     pub(crate) fn insert(&mut self, key: K, value: V) -> Option<V> {
         debug_assert!(self.data.len().is_power_of_two());
-        debug_assert!(self.metadata.len() == self.data.len() + GROUP_SIZE);
+        debug_assert!(self.metadata.len() == self.data.len() + REFERENCE_GROUP_SIZE);
 
         let mask = self.data.len() - 1;
         let hash = H::hash(key.as_slice());
@@ -352,11 +352,11 @@ where
                 *entry_at_mut(self.data, index) = Entry::new(key, value);
                 *metadata_at_mut(self.metadata, index) = h2;
 
-                if index < GROUP_SIZE {
+                if index < REFERENCE_GROUP_SIZE {
                     let first_mirror = self.data.len();
                     *metadata_at_mut(self.metadata, first_mirror + index) = h2;
                     debug_assert_eq!(
-                        self.metadata[..GROUP_SIZE],
+                        self.metadata[..REFERENCE_GROUP_SIZE],
                         self.metadata[self.data.len()..]
                     );
                 }
@@ -408,7 +408,7 @@ where
 {
     pub(crate) fn new(metadata: &'a [EntryMetadata], data: &'a [Entry<K, V>]) -> RawIter<'a, K, V> {
         debug_assert!(data.len().is_power_of_two());
-        debug_assert!(metadata.len() == data.len() + GROUP_SIZE);
+        debug_assert!(metadata.len() == data.len() + REFERENCE_GROUP_SIZE);
 
         RawIter {
             metadata,
@@ -529,7 +529,7 @@ mod tests {
     ) -> (Vec<EntryMetadata>, Vec<Entry<K, V>>) {
         let size = xs.size_hint().0.next_power_of_two();
         let mut data = vec![Entry::default(); size];
-        let mut metadata = vec![255; size + GROUP_SIZE];
+        let mut metadata = vec![255; size + REFERENCE_GROUP_SIZE];
 
         assert!(metadata.iter().all(|b| is_empty_or_deleted(*b)));
 
