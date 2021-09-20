@@ -62,8 +62,11 @@ impl Header {
 
         if raw_bytes.len() != bytes_needed::<C>(self.slot_count()) {
             return Err(Error(format!(
-                "Provided allocation has wrong size for slot count {}",
-                self.slot_count()
+                "Provided allocation has wrong size for slot count {}. \
+                 The allocation's size is {} but the expected size is {}.",
+                self.slot_count(),
+                raw_bytes.len(),
+                bytes_needed::<C>(self.slot_count()),
             )));
         }
 
