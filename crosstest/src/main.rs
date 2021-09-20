@@ -1,5 +1,20 @@
 // This test makes sure that a hash table generated with SIMD support
-// can be loaded on a platform without SIMD support.
+// can be loaded on a platform without SIMD support and vice versa.
+//
+// It works this way:
+//
+// The executable has two options: "write" and "read". When "write" is
+// enabled, it will write a hashtable to /tmp. When "read" is enabled,
+// it will try to read a hashtable from /tmp and verify that it contains
+// the expected data.
+//
+// We compile the executable two times, once with and once without SIMD
+// support. With both versions we generate a hashtable in /tmp and then
+// try to load and verify that hashtable with the respective other
+// version of the executable, that is, the SIMD-version will try to load
+// the non-SIMD version and vice versa.
+//
+// See .github/workflows/ci.yml for how this is used.
 
 struct FxConfig;
 

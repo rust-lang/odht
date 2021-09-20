@@ -67,11 +67,12 @@ jobs:
       run: cargo doc --verbose
     - name: Run SIMD/no-SIMD tests
       run: |
+        # See crosstest/main.rs for more info on the test
         cd crosstest
-        # Create some no-simd test files
+        # Create a no-simd test file in /tmp
         cargo run --verbose --features no_simd -- write
         cargo clean
-        # Create some simd test files and test the no-simd files
+        # Create a simd-enabled test file and test the no-simd file
         cargo run --verbose -- write read
         cargo clean
         # Test the simd-enabled files we generated in the last step
