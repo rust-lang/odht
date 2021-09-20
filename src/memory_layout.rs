@@ -12,7 +12,7 @@ use crate::{
 };
 use crate::{swisstable_group_query::REFERENCE_GROUP_SIZE, Config};
 
-const CURRENT_FILE_FORMAT_VERSION: [u8; 4] = [0, 0, 0, 1];
+const CURRENT_FILE_FORMAT_VERSION: [u8; 4] = [0, 0, 0, 2];
 
 #[repr(C)]
 #[derive(Clone)]
