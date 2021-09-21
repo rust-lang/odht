@@ -1,6 +1,9 @@
+use std::num::NonZeroU64;
+
 pub const GROUP_SIZE: usize = 8;
 
 type GroupWord = u64;
+type NonZeroGroupWord = NonZeroU64;
 
 pub struct GroupQuery {
     eq_mask: GroupWord,
@@ -47,11 +50,7 @@ impl GroupQuery {
 
     #[inline]
     pub fn first_empty(&self) -> Option<usize> {
-        if self.empty_mask == 0 {
-            None
-        } else {
-            Some(lowest_bit_set_non_zero(self.empty_mask) / 8)
-        }
+        Some((NonZeroGroupWord::new(self.empty_mask)?.trailing_zeros() / 8) as usize)
     }
 }
 
@@ -60,27 +59,12 @@ impl Iterator for GroupQuery {
 
     #[inline]
     fn next(&mut self) -> Option<usize> {
-        if self.eq_mask == 0 {
-            None
-        } else {
-            let i = lowest_bit_set_non_zero(self.eq_mask) / 8;
-            self.eq_mask &= self.eq_mask - 1;
-            Some(i)
-        }
-    }
-}
+        let index = NonZeroGroupWord::new(self.eq_mask)?.trailing_zeros() / 8;
 
-#[inline]
-fn lowest_bit_set_non_zero(x: GroupWord) -> usize {
-    debug_assert!(x != 0);
+        // Clear the lowest bit
+        // http://graphics.stanford.edu/~seander/bithacks.html#CountBitsSetKernighan
+        self.eq_mask &= self.eq_mask - 1;
 
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "nightly")] {
-            unsafe {
-                std::intrinsics::cttz_nonzero(x) as usize
-            }
-        } else {
-            x.trailing_zeros() as usize
-        }
+        Some(index as usize)
     }
 }

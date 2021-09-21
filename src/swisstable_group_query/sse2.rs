@@ -1,3 +1,5 @@
+use core::num::NonZeroU16;
+
 #[cfg(target_arch = "x86")]
 use core::arch::x86;
 #[cfg(target_arch = "x86_64")]
@@ -32,11 +34,7 @@ impl GroupQuery {
 
     #[inline]
     pub fn first_empty(&self) -> Option<usize> {
-        if self.empty == 0 {
-            None
-        } else {
-            Some(lowest_bit_set_non_zero(self.empty))
-        }
+        Some(NonZeroU16::new(self.empty)?.trailing_zeros() as usize)
     }
 }
 
@@ -45,31 +43,12 @@ impl Iterator for GroupQuery {
 
     #[inline]
     fn next(&mut self) -> Option<usize> {
-        if self.matches == 0 {
-            None
-        } else {
-            let index = lowest_bit_set_non_zero(self.matches);
+        let index = NonZeroU16::new(self.matches)?.trailing_zeros();
 
-            // Clear the lowest bit
-            // http://graphics.stanford.edu/~seander/bithacks.html#CountBitsSetKernighan
-            self.matches &= self.matches - 1;
+        // Clear the lowest bit
+        // http://graphics.stanford.edu/~seander/bithacks.html#CountBitsSetKernighan
+        self.matches &= self.matches - 1;
 
-            Some(index)
-        }
-    }
-}
-
-#[inline]
-fn lowest_bit_set_non_zero(x: u16) -> usize {
-    debug_assert!(x != 0);
-
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "nightly")] {
-            unsafe {
-                std::intrinsics::cttz_nonzero(x) as usize
-            }
-        } else {
-            x.trailing_zeros() as usize
-        }
+        Some(index as usize)
     }
 }
