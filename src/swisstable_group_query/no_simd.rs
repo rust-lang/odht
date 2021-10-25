@@ -29,7 +29,7 @@ impl GroupQuery {
         // has pretty much the same effect as a hash collision, something
         // that we need to deal with in any case anyway.
 
-        let group = GroupWord::from_le_bytes(*group);
+        let group = GroupWord::from_ne_bytes(*group);
         let cmp = group ^ repeat(h2);
         let high_bit_greater_than_128 = (!cmp) & repeat(0x80);
         let high_bit_greater_than_128_or_zero = cmp.wrapping_sub(repeat(0x01));
