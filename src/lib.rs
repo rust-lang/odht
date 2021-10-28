@@ -94,6 +94,7 @@ mod swisstable_group_query;
 mod unhash;
 
 use error::Error;
+use memory_layout::Header;
 use std::borrow::{Borrow, BorrowMut};
 use swisstable_group_query::REFERENCE_GROUP_SIZE;
 
@@ -217,12 +218,14 @@ impl<C: Config> HashTableOwned<C> {
         let encoded_key = C::encode_key(key);
         let encoded_value = C::encode_value(value);
 
-        if let Some(old_value) = self.as_raw_mut().insert(encoded_key, encoded_value) {
-            Some(C::decode_value(&old_value))
-        } else {
-            self.allocation.header_mut().set_item_count(item_count + 1);
-            None
-        }
+        with_raw_mut(&mut self.allocation, |header, mut raw_table| {
+            if let Some(old_value) = raw_table.insert(encoded_key, encoded_value) {
+                Some(C::decode_value(&old_value))
+            } else {
+                header.set_item_count(item_count + 1);
+                None
+            }
+        })
     }
 
     #[inline]
@@ -308,12 +311,6 @@ impl<C: Config> HashTableOwned<C> {
         RawTable::new(entry_metadata, entry_data)
     }
 
-    #[inline]
-    fn as_raw_mut(&mut self) -> RawTableMut<'_, C::EncodedKey, C::EncodedValue, C::H> {
-        let (entry_metadata, entry_data) = self.allocation.data_slices_mut();
-        RawTableMut::new(entry_metadata, entry_data)
-    }
-
     #[inline(never)]
     #[cold]
     fn grow(&mut self) {
@@ -327,17 +324,14 @@ impl<C: Config> HashTableOwned<C> {
         // Copy the entries over with the internal `insert_entry()` method,
         // which allows us to do insertions without hashing everything again.
         {
-            let mut new_table = new_table.as_raw_mut();
+            with_raw_mut(&mut new_table.allocation, |header, mut raw_table| {
+                for (_, entry_data) in self.as_raw().iter() {
+                    raw_table.insert(entry_data.key, entry_data.value);
+                }
 
-            for (_, entry_data) in self.as_raw().iter() {
-                new_table.insert(entry_data.key, entry_data.value);
-            }
+                header.set_item_count(initial_item_count);
+            });
         }
-
-        new_table
-            .allocation
-            .header_mut()
-            .set_item_count(initial_item_count);
 
         *self = new_table;
 
@@ -461,12 +455,6 @@ impl<C: Config, D: Borrow<[u8]> + BorrowMut<[u8]>> HashTable<C, D> {
         Ok(HashTable { allocation })
     }
 
-    #[inline]
-    fn as_raw_mut(&mut self) -> RawTableMut<'_, C::EncodedKey, C::EncodedValue, C::H> {
-        let (entry_metadata, entry_data) = self.allocation.data_slices_mut();
-        RawTableMut::new(entry_metadata, entry_data)
-    }
-
     /// Inserts the given key-value pair into the table.
     /// Unlike [HashTableOwned::insert] this method cannot grow the underlying table
     /// if there is not enough space for the new item. Instead the call will panic.
@@ -483,12 +471,14 @@ impl<C: Config, D: Borrow<[u8]> + BorrowMut<[u8]>> HashTable<C, D> {
         let encoded_key = C::encode_key(key);
         let encoded_value = C::encode_value(value);
 
-        if let Some(old_value) = self.as_raw_mut().insert(encoded_key, encoded_value) {
-            Some(C::decode_value(&old_value))
-        } else {
-            self.allocation.header_mut().set_item_count(item_count + 1);
-            None
-        }
+        with_raw_mut(&mut self.allocation, |header, mut raw_table| {
+            if let Some(old_value) = raw_table.insert(encoded_key, encoded_value) {
+                Some(C::decode_value(&old_value))
+            } else {
+                header.set_item_count(item_count + 1);
+                None
+            }
+        })
     }
 }
 
@@ -534,6 +524,18 @@ fn slots_needed(item_count: usize, max_load_factor: Factor) -> usize {
 fn max_item_count_for(slot_count: usize, max_load_factor: Factor) -> usize {
     // Note: we round down here
     max_load_factor.apply(slot_count)
+}
+
+#[inline]
+fn with_raw_mut<C, M, F, R>(allocation: &mut memory_layout::Allocation<C, M>, f: F) -> R
+where
+    C: Config,
+    M: BorrowMut<[u8]>,
+    F: FnOnce(&mut Header, RawTableMut<'_, C::EncodedKey, C::EncodedValue, C::H>) -> R,
+{
+    allocation.with_mut_parts(|header, entry_metadata, entry_data| {
+        f(header, RawTableMut::new(entry_metadata, entry_data))
+    })
 }
 
 /// This type is used for computing max item counts for a given load factor
