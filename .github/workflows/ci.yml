@@ -17,6 +17,7 @@ jobs:
     needs:
       - build
       - test-with-sanitizer
+      - test-big-endian
     steps:
       - name: mark the job as a success or failure
         run: exit 0
@@ -104,10 +105,11 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: Install nightly Rust
-      run: rustup override set nightly
+      run: |
+        rustup override set nightly
+        rustup component add rust-src --toolchain nightly
     - name: Test with Address Sanitizer
       run: |
-        rustup component add rust-src --toolchain nightly
         cargo clean
         export RUSTFLAGS=-Zsanitizer=address
         export RUSTDOCFLAGS=-Zsanitizer=address
@@ -117,3 +119,19 @@ jobs:
         export RUSTDOCFLAGS='-Zsanitizer=memory -Zsanitizer-memory-track-origins'
         cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --verbose --features=${{ matrix.features }}
 
+  test-big-endian:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install nightly Rust
+      run: |
+        rustup toolchain install nightly --allow-downgrade -c miri --profile minimal
+        rustup default nightly
+    - name: Run Big Endian Test via Miri
+      # We only run a subset of tests because Miri is too slow for running everything
+      run: |
+        cargo miri test --target mips64-unknown-linux-gnuabi64 -- \
+          --skip raw_table \
+          --skip init_in_place \
+          --skip quickchecks
