@@ -37,7 +37,7 @@ const HEADER_TAG: [u8; 4] = *b"ODHT";
 const HEADER_SIZE: usize = size_of::<Header>();
 
 impl Header {
-    pub fn sanity_check<C: Config>(&self, raw_bytes: &[u8]) -> Result<(), Error> {
+    pub fn sanity_check<C: Config>(&self, raw_bytes_len: usize) -> Result<(), Error> {
         assert!(align_of::<Header>() == 1);
         assert!(HEADER_SIZE % 8 == 0);
 
@@ -60,12 +60,12 @@ impl Header {
         check_expected_size::<C::EncodedValue>("Config::EncodedValue", self.size_of_value)?;
         check_expected_size::<Header>("Header", self.size_of_header)?;
 
-        if raw_bytes.len() != bytes_needed::<C>(self.slot_count()) {
+        if raw_bytes_len != bytes_needed::<C>(self.slot_count()) {
             return Err(Error(format!(
                 "Provided allocation has wrong size for slot count {}. \
                  The allocation's size is {} but the expected size is {}.",
                 self.slot_count(),
-                raw_bytes.len(),
+                raw_bytes_len,
                 bytes_needed::<C>(self.slot_count()),
             )));
         }
@@ -120,9 +120,14 @@ impl Header {
 
     #[inline]
     fn metadata_offset<C: Config>(&self) -> isize {
+        self.entry_data_offset() + self.entry_data_size_in_bytes::<C>() as isize
+    }
+
+    #[inline]
+    fn entry_data_size_in_bytes<C: Config>(&self) -> usize {
         let slot_count = self.slot_count();
         let size_of_entry = size_of::<Entry<C::EncodedKey, C::EncodedValue>>();
-        (HEADER_SIZE + slot_count * size_of_entry) as isize
+        slot_count * size_of_entry
     }
 
     #[inline]
@@ -151,7 +156,7 @@ impl Header {
             padding: [0u8; 2],
         };
 
-        assert_eq!(header.sanity_check::<C>(raw_bytes), Ok(()));
+        assert_eq!(header.sanity_check::<C>(raw_bytes.len()), Ok(()));
 
         unsafe {
             *(raw_bytes.as_mut_ptr() as *mut Header) = header;
@@ -183,7 +188,7 @@ where
 
         allocation
             .header()
-            .sanity_check::<C>(allocation.bytes.borrow())?;
+            .sanity_check::<C>(allocation.bytes.borrow().len())?;
 
         // Check that the hash function provides the expected hash values.
         {
@@ -210,7 +215,7 @@ where
 
         let header: &Header = unsafe { &*(raw_bytes.as_ptr() as *const Header) };
 
-        debug_assert_eq!(header.sanity_check::<C>(raw_bytes), Ok(()));
+        debug_assert_eq!(header.sanity_check::<C>(raw_bytes.len()), Ok(()));
 
         header
     }
@@ -237,19 +242,20 @@ where
             )
         };
 
-        unsafe {
-            debug_assert_eq!(
-                raw_bytes.as_ptr().offset(raw_bytes.len() as isize),
-                entry_metadata
-                    .as_ptr()
-                    .offset(entry_metadata.len() as isize) as *const u8
-            );
+        debug_assert_eq!(
+            entry_data.as_ptr_range().start as usize,
+            raw_bytes.as_ptr_range().start as usize + HEADER_SIZE,
+        );
 
-            debug_assert_eq!(
-                entry_data.as_ptr().offset(entry_data.len() as isize) as *const u8,
-                entry_metadata.as_ptr() as *const u8
-            );
-        }
+        debug_assert_eq!(
+            entry_data.as_ptr_range().end as usize,
+            entry_metadata.as_ptr_range().start as usize,
+        );
+
+        debug_assert_eq!(
+            raw_bytes.as_ptr_range().end as usize,
+            entry_metadata.as_ptr_range().end as usize,
+        );
 
         (entry_metadata, entry_data)
     }
@@ -266,60 +272,58 @@ where
     M: BorrowMut<[u8]>,
 {
     #[inline]
-    pub fn header_mut(&mut self) -> &mut Header {
+    pub fn with_mut_parts<R>(
+        &mut self,
+        f: impl FnOnce(
+            &mut Header,
+            &mut [EntryMetadata],
+            &mut [Entry<C::EncodedKey, C::EncodedValue>],
+        ) -> R,
+    ) -> R {
         let raw_bytes = self.bytes.borrow_mut();
-        debug_assert!(raw_bytes.len() >= HEADER_SIZE);
 
-        let header: &mut Header = unsafe { &mut *(raw_bytes.as_mut_ptr() as *mut Header) };
+        // Copy the address as an integer so we can use it for the debug_assertion
+        // below without accessing `raw_bytes` again.
+        let _raw_bytes_end_addr = raw_bytes.as_ptr_range().end as usize;
 
-        debug_assert_eq!(header.sanity_check::<C>(raw_bytes), Ok(()));
+        let (header, rest) = raw_bytes.split_at_mut(HEADER_SIZE);
+        let header: &mut Header = unsafe { &mut *(header.as_mut_ptr() as *mut Header) };
 
-        header
-    }
+        let slot_count = header.slot_count();
+        let entry_data_size_in_bytes = header.entry_data_size_in_bytes::<C>();
 
-    #[inline]
-    pub fn data_slices_mut<'a>(
-        &'a mut self,
-    ) -> (
-        &'a mut [EntryMetadata],
-        &'a mut [Entry<C::EncodedKey, C::EncodedValue>],
-    ) {
-        let slot_count = self.header().slot_count();
-        let metadata_offset = self.header().metadata_offset::<C>();
-        let entry_data_offset = self.header().entry_data_offset();
-
-        let raw_bytes = self.bytes.borrow_mut();
+        let (entry_data_bytes, metadata_bytes) = rest.split_at_mut(entry_data_size_in_bytes);
 
         let entry_metadata = unsafe {
             std::slice::from_raw_parts_mut(
-                raw_bytes.as_mut_ptr().offset(metadata_offset) as *mut EntryMetadata,
+                metadata_bytes.as_mut_ptr() as *mut EntryMetadata,
                 slot_count + REFERENCE_GROUP_SIZE,
             )
         };
 
         let entry_data = unsafe {
             std::slice::from_raw_parts_mut(
-                raw_bytes.as_mut_ptr().offset(entry_data_offset)
-                    as *mut Entry<C::EncodedKey, C::EncodedValue>,
+                entry_data_bytes.as_mut_ptr() as *mut Entry<C::EncodedKey, C::EncodedValue>,
                 slot_count,
             )
         };
 
-        unsafe {
-            debug_assert_eq!(
-                raw_bytes.as_ptr().offset(raw_bytes.len() as isize),
-                entry_metadata
-                    .as_ptr()
-                    .offset(entry_metadata.len() as isize) as *const u8
-            );
+        debug_assert_eq!(
+            entry_data.as_ptr_range().start as usize,
+            header as *mut Header as usize + HEADER_SIZE,
+        );
 
-            debug_assert_eq!(
-                entry_data.as_ptr().offset(entry_data.len() as isize) as *const u8,
-                entry_metadata.as_ptr() as *const u8
-            );
-        }
+        debug_assert_eq!(
+            entry_data.as_ptr_range().end as usize,
+            entry_metadata.as_ptr_range().start as usize,
+        );
 
-        (entry_metadata, entry_data)
+        debug_assert_eq!(
+            _raw_bytes_end_addr,
+            entry_metadata.as_ptr_range().end as usize,
+        );
+
+        f(header, entry_metadata, entry_data)
     }
 }
 
@@ -356,11 +360,10 @@ pub(crate) fn init_in_place<C: Config, M: BorrowMut<[u8]>>(
         _config: PhantomData::default(),
     };
 
-    {
-        let (metadata, data) = allocation.data_slices_mut();
+    allocation.with_mut_parts(|_, metadata, data| {
         metadata.fill(0xFF);
         data.fill(Default::default());
-    }
+    });
 
     allocation
 }
